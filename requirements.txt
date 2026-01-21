@@ -1,0 +1,8 @@
+numpy
+scikit-image
+napari
+qtpy
+pyside6
+torch
+torchvision
+opencv-python
