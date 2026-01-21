@@ -56,15 +56,6 @@ laticifer_app/
 
 ## Installation
 
-### Option A: Conda (recommended)
-
-```bash
-conda env create -f environment.yml
-conda activate laticifer-env
-```
-
-### Option B: Pip
-
 ```bash
 python -m venv venv
 source venv/bin/activate  # or venv\Scripts\activate on Windows
