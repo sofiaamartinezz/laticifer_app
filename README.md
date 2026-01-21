@@ -23,8 +23,6 @@ laticifer_app/
 │  ├─ preprocessing.py     # CLAHE utilities
 │  └─ inference.py         # Patch-based inference
 │  └─ quantification.py    # Laticifer quantification utilities
-└─ models/
-   └─ best_model_soft_clDice.pth
 ```
 
 ## Module responsibilities
