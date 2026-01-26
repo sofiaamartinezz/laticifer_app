@@ -2,3 +2,8 @@ dataset/
 __pycache__/
 run_laticifer_app.sh
 models/
+venv/
+env/
+*.lnk
+info/
+Library/
