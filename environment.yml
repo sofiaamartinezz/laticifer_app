@@ -1,0 +1,27 @@
+name: latiseg
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  # Core GUI and Image libs
+  - napari
+  - pyqt
+  - numpy
+  - pandas
+  - scikit-image
+  - pillow
+  - tqdm
+  # Deep Learning (installing via conda ensures CUDA drivers work on their PC)
+  - pytorch
+  - torchvision
+  - pytorch-cuda=12.1  # Or 11.8
+  # Augmentation
+  - albumentations
+  # Pip specific dependencies if conda doesn't have them
+  - pip:
+    - segmentation-models-pytorch
+    - qtpy
+    - opencv-python-headless
