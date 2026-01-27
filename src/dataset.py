@@ -200,7 +200,8 @@ def save_annotation(
         return None
 
     # Quantification
-    px_stats = analyze_density_pixel_ratio(mask_labels)
+    px_stats_tissue_only = analyze_density_pixel_ratio(mask_labels, use_tissue_mask=True)
+    px_stats_whole_image = analyze_density_pixel_ratio(mask_labels)
 
     direction = (transect_direction or "both").lower().strip()
     if direction not in ("horizontal", "vertical", "both"):
@@ -227,6 +228,7 @@ def save_annotation(
         "image_shape_y",
         "image_shape_x",
         "laticifer_pixels",
+        "density_tissue",
         "density",
         "transect_direction",
         "transect_num_lines",
@@ -243,10 +245,14 @@ def save_annotation(
         "initialized_from_model": "True" if initialized_from_model else "False",
         "image_shape_y": image_shape_y,
         "image_shape_x": image_shape_x,
-        "laticifer_pixels": int(px_stats["laticifer_pixels"]),
+        "laticifer_pixels": int(px_stats_whole_image["laticifer_pixels"]),
+        "density_tissue": (
+            f"{float(px_stats_tissue_only['pixel_ratio']):.6f}"
+            if np.isfinite(px_stats_tissue_only["pixel_ratio"]) else ""
+        ),
         "density": (
-            f"{float(px_stats['pixel_ratio']):.6f}"
-            if np.isfinite(px_stats["pixel_ratio"]) else ""
+            f"{float(px_stats_whole_image['pixel_ratio']):.6f}"
+            if np.isfinite(px_stats_whole_image["pixel_ratio"]) else ""
         ),
         "transect_direction": direction,
         "transect_num_lines": num_lines,
@@ -274,4 +280,3 @@ def save_annotation(
         f"Annotation saved to:\n{mask_out}\nLog updated at {csv_path}",
     )
     return image_out, mask_out
-

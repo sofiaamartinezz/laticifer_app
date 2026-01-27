@@ -206,10 +206,11 @@ class InteractiveEditorWidget(QWidget):
     def _on_layer_inserted(self, event) -> None:
         layer = event.value
         if isinstance(layer, napari.layers.Labels):
-            self.labels_layer = layer
-            self.labels_layer.editable = True
-            self.labels_layer.mode = "paint"
-            self.labels_layer.selected_label = 1
+            if not layer.metadata.get("is_debug_tissue_mask", False):
+                self.labels_layer = layer
+                self.labels_layer.editable = True
+                self.labels_layer.mode = "paint"
+                self.labels_layer.selected_label = 1
         if isinstance(layer, napari.layers.Image) and self.base_image_layer is None:
             self.base_image_layer = layer
         self._update_button_states()
@@ -375,11 +376,15 @@ class InteractiveEditorWidget(QWidget):
                     if "Computed Tissue Area" in self.viewer.layers:
                         self.viewer.layers.remove("Computed Tissue Area")
 
-                    self.viewer.add_labels(
+                    tissue_layer = self.viewer.add_labels(
                         debug_mask,
                         name="Computed Tissue Area",
                         opacity=0.3,
+                        metadata={"is_debug_tissue_mask": True},
                     )
+                    tissue_layer.editable = False
+                    if self.labels_layer is not None:
+                        self.viewer.layers.selection.active = self.labels_layer
                     print("[DEBUG] Tissue mask added to viewer.")
             else:
                 # If user chose whole image, remove old debug layer if present
