@@ -14,7 +14,7 @@ dependencies:
   - scikit-image
   - pillow
   - tqdm
-  # Deep Learning (installing via conda ensures CUDA drivers work on their PC)
+  # Deep Learning
   - pytorch
   - torchvision
   - pytorch-cuda=12.1  # Or 11.8

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import napari
+import pandas as pd
 import numpy as np
 from qtpy import QtCore
 from qtpy.QtWidgets import (
@@ -327,89 +328,99 @@ class InteractiveEditorWidget(QWidget):
         if self.labels_layer is None:
             QMessageBox.warning(self, "No mask", "Create or load a mask first.")
             return
+
         mask = np.asarray(self.labels_layer.data)
         image_layer = self._get_original_image_layer()
-        
+
         dlg = QuantificationDialog(self, viewer=self.viewer, image_layer=image_layer)
-        if dlg.exec_() != QDialog.Accepted: return
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
         params = dlg.get_params()
 
+        # -------------------------------------------------
+        # PIXEL RATIO (Whole image vs Tissue-only)
+        # -------------------------------------------------
         if params["method"] == "pixel_ratio":
-            # Check if user wants to exclude background
-            use_tissue_mask = False
-            
-            # Simple check: If the laticifer mask touches the image borders, 
-            # the image is likely a full crop. If it's floating in the middle, it has background.
-            # You can ask the user:
-            msg_box = QMessageBox()
-            msg_box.setWindowTitle("Density Calculation Mode")
-            msg_box.setText("How should the Total Area be calculated?")
-            msg_box.setInformativeText(
-                "Whole Image: Density = Laticifers / (Width x Height)\n"
-                "Tissue Only: Density = Laticifers / (Area occupied by leaf)"
+            # Better choice dialog
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Question)
+            msg.setWindowTitle("Density calculation area")
+            msg.setText("Choose the area used as denominator for density.")
+            msg.setInformativeText(
+                "• Whole image: Density = laticifer pixels / (width × height)\n"
+                "• Tissue only: Density = laticifer pixels / (detected leaf/tissue area)\n\n"
+                "Tip: Use 'Tissue only' if your image contains background."
             )
-            btn_whole = msg_box.addButton("Whole Image", QMessageBox.ActionRole)
-            btn_tissue = msg_box.addButton("Tissue Only (Auto)", QMessageBox.ActionRole)
-            msg_box.addButton(QMessageBox.Cancel)
-            
-            msg_box.exec_()
-            
-            if msg_box.clickedButton() == msg_box.button(QMessageBox.Cancel):
-                return
-            
-            if msg_box.clickedButton() == btn_tissue:
-                use_tissue_mask = True
+            msg.setStandardButtons(QMessageBox.Cancel)
+            btn_whole = msg.addButton("Whole image", QMessageBox.AcceptRole)
+            btn_tissue = msg.addButton("Tissue only (auto)", QMessageBox.AcceptRole)
 
-            # Call the updated function
+            # Default selection (tissue is usually safer if there is background)
+            msg.setDefaultButton(btn_tissue)
+
+            msg.exec_()
+            if msg.clickedButton() == msg.button(QMessageBox.Cancel):
+                return
+
+            use_tissue_mask = (msg.clickedButton() == btn_tissue)
+
+            # Compute stats
             stats = analyze_density_pixel_ratio(mask, use_tissue_mask=use_tissue_mask)
-            
-            # --- CROP VISUALIZATION LOGIC ---
-            debug_mask = stats.get("debug_tissue_mask")
-            if debug_mask is not None:
-                # Remove previous debug layer if it exists
+
+            # Show tissue mask overlay only if used
+            if use_tissue_mask:
+                debug_mask = stats.get("debug_tissue_mask")
+                if debug_mask is not None:
+                    if "Computed Tissue Area" in self.viewer.layers:
+                        self.viewer.layers.remove("Computed Tissue Area")
+
+                    self.viewer.add_labels(
+                        debug_mask,
+                        name="Computed Tissue Area",
+                        opacity=0.3,
+                    )
+                    print("[DEBUG] Tissue mask added to viewer.")
+            else:
+                # If user chose whole image, remove old debug layer if present
                 if "Computed Tissue Area" in self.viewer.layers:
                     self.viewer.layers.remove("Computed Tissue Area")
-                
-                # Add the new mask as a transparent label
-                self.viewer.add_labels(
-                    debug_mask, 
-                    name="Computed Tissue Area", 
-                    opacity=0.3,
-                )
-                print("[DEBUG] Tissue mask added to viewer.")
-            # --------------------------------
-            
+
+            # Store + report
             self.last_density_ratio = float(stats["pixel_ratio"])
             self.last_density_percent = float(stats["density_percentage"])
-            
+
+            denom_text = "Detected tissue area" if use_tissue_mask else "Total image area"
             QMessageBox.information(
-                self, 
+                self,
                 "Laticifer density",
                 f"Density: {self.last_density_percent:.2f}%\n"
-                f"(Laticifers / Detected Tissue Area)" if use_tissue_mask else f"(Laticifers / Total Image Area)"
+                f"(Laticifers / {denom_text})"
             )
-            self.last_density_ratio = float(stats["pixel_ratio"])
-            self.last_density_percent = float(stats["density_percentage"])
-            QMessageBox.information(
-                self, "Laticifer density",
-                f"Density: {self.last_density_percent:.2f}%"
-            )
+
+        # -------------------------------------------------
+        # TRANSECT METHOD (unchanged)
+        # -------------------------------------------------
         else:
             direction = str(params["direction"]).lower().strip()
             num_lines = max(1, int(params.get("num_lines", 10)))
             self.last_transect_num_lines = num_lines
             self.last_transect_direction = direction
+
             stats, lines, pts = analyze_density_transect(
                 mask, num_lines=num_lines, direction=direction
             )
+
             # Visualize lines/points
-            if "Transect lines" in self.viewer.layers: self.viewer.layers.remove("Transect lines")
+            if "Transect lines" in self.viewer.layers:
+                self.viewer.layers.remove("Transect lines")
             self.viewer.add_shapes(lines, name="Transect lines", shape_type="line", edge_width=2)
-            
-            if "Intersection points" in self.viewer.layers: self.viewer.layers.remove("Intersection points")
+
+            if "Intersection points" in self.viewer.layers:
+                self.viewer.layers.remove("Intersection points")
             if bool(params.get("show_points", True)):
                 self.viewer.add_points(pts, name="Intersection points", size=6)
-                
+
             mean = stats.get("mean_intersections_per_line", float("nan"))
             QMessageBox.information(self, "Transect Results", f"Mean intersections: {mean:.2f}")
 

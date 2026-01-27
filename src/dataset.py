@@ -25,8 +25,6 @@ def ensure_dataset_root(
     if dataset_root is not None:
         return dataset_root
 
-    from pathlib import Path as _Path
-
     # 1) Try infer from image path
     img_path = None
     if current_image_layer is not None:

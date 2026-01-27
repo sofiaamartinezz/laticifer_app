@@ -63,7 +63,7 @@ def analyze_density_pixel_ratio(
     mask: np.ndarray, 
     roi: Optional[Tuple[slice, slice]] = None,
     use_tissue_mask: bool = False
-) -> Dict[str, object]:  # Changed return type hint to allow object/array
+) -> Dict[str, object]:
     
     data = mask
     if roi is not None:
@@ -169,7 +169,7 @@ def analyze_density_transect(
             line_pixels = mask_bin[y, :]
             diffs = np.diff(line_pixels.astype(np.int8))
 
-            num_intersections = int(np.count_nonzero(diffs == 1))  # EXACTLY like script
+            num_intersections = int(np.count_nonzero(diffs == 1))
             horizontal_intersections.append(num_intersections)
 
             xs = np.where(diffs == 1)[0] + 1
@@ -188,7 +188,7 @@ def analyze_density_transect(
             line_pixels = mask_bin[:, x]
             diffs = np.diff(line_pixels.astype(np.int8))
 
-            num_intersections = int(np.count_nonzero(diffs == 1))  # EXACTLY like script
+            num_intersections = int(np.count_nonzero(diffs == 1))
             vertical_intersections.append(num_intersections)
 
             ys = np.where(diffs == 1)[0] + 1

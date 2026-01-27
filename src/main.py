@@ -23,7 +23,6 @@ from ui import LaticiferAnnotationWidget
 
 def main():
     # --- 1. WINDOWS TASKBAR FIX ---
-    # This tells Windows: "I am a specific app, not just generic Python"
     if os.name == 'nt':
         myappid = 'upv.latiseg.assist.v1' # Arbitrary string
         try:
@@ -33,10 +32,8 @@ def main():
 
     # --- 2. LAUNCH VIEWER ---
     viewer = napari.Viewer(title="LaticiferSegmentationApp")
-    
+
     # --- 3. SET THE ICON ---
-    # Calculate path relative to this script
-    # Assuming structure: LatiSeg_App/src/main.py and LatiSeg_App/resources/app_icon.ico
     current_dir = Path(__file__).parent
     icon_path = current_dir.parent / "resources" / "app_icon.ico"
     
