@@ -9,22 +9,10 @@ import pandas as pd
 import numpy as np
 from qtpy import QtCore
 from qtpy.QtWidgets import (
-    QFileDialog,
-    QGroupBox,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-    QCheckBox,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
-    QSpinBox,
-    QTabWidget,
-    QLineEdit,
-    QProgressBar,
+    QFileDialog, QGroupBox, QLabel, QMessageBox, 
+    QPushButton, QVBoxLayout, QHBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QFormLayout, QSpinBox, QTabWidget, QLineEdit, QProgressBar,
 )
 from napari.qt.threading import thread_worker
 from skimage import io as skio
@@ -46,6 +34,11 @@ from utils.quantification import (
     analyze_density_pixel_ratio,
     analyze_density_transect,
 )
+from utils.postprocessing import (
+    fill_small_holes, remove_small_objects,
+    dilate_mask, erode_mask, skeletonize_mask
+)
+
 
 # -----------------------------------------------------------------------------
 #  DIALOG: Quantification Settings
@@ -179,6 +172,64 @@ class InteractiveEditorWidget(QWidget):
         mask_group.setLayout(mask_layout)
         layout.addWidget(mask_group)
 
+        # Mask refinement
+        refine_group = QGroupBox("Mask Refinement")
+        refine_layout = QVBoxLayout()
+
+        # Row 1: Cleaning Tools (Remove Small & Keep Largest)
+        row_clean = QHBoxLayout()
+        
+        # Remove Small Objects (Existing)
+        self.spin_min_size = QSpinBox()
+        self.spin_min_size.setRange(1, 10000)
+        self.spin_min_size.setValue(100)
+        self.spin_min_size.setSuffix(" px")
+        self.spin_min_size.setToolTip("Remove objects smaller than this")
+        
+        self.btn_remove_small = QPushButton("Remove Small")
+        self.btn_remove_small.clicked.connect(self._on_remove_small_objects)
+        self.btn_remove_small.setEnabled(False)
+        
+        row_clean.addWidget(self.spin_min_size)
+        row_clean.addWidget(self.btn_remove_small)
+        refine_layout.addLayout(row_clean)
+
+        # Row 2: Topology (Skeletonize) -- REPLACED FILL HOLES
+        row_topo = QHBoxLayout()
+        self.btn_skeleton = QPushButton("Skeletonize")
+        self.btn_skeleton.setToolTip("Reduce mask to 1-pixel wide centerlines")
+        self.btn_skeleton.clicked.connect(self._on_skeletonize)
+        self.btn_skeleton.setEnabled(False)
+        
+        # Optional: Add a label or spacer to fill the row
+        row_topo.addWidget(QLabel("Topology:"))
+        row_topo.addWidget(self.btn_skeleton)
+        refine_layout.addLayout(row_topo)
+
+        # Row 3: Morphology (Dilate/Erode) -- SAME AS BEFORE
+        row_morph = QHBoxLayout()
+        self.spin_radius = QSpinBox()
+        self.spin_radius.setRange(1, 20)
+        self.spin_radius.setValue(1)
+        self.spin_radius.setSuffix(" px")
+        
+        self.btn_dilate = QPushButton("Dilate")
+        self.btn_dilate.clicked.connect(self._on_dilate)
+        self.btn_dilate.setEnabled(False)
+
+        self.btn_erode = QPushButton("Erode")
+        self.btn_erode.clicked.connect(self._on_erode)
+        self.btn_erode.setEnabled(False)
+
+        row_morph.addWidget(QLabel("Radius:"))
+        row_morph.addWidget(self.spin_radius)
+        row_morph.addWidget(self.btn_dilate)
+        row_morph.addWidget(self.btn_erode)
+        refine_layout.addLayout(row_morph)
+
+        refine_group.setLayout(refine_layout)
+        layout.addWidget(refine_group)
+
         layout.addSpacing(15)
 
         # Quantification
@@ -228,10 +279,14 @@ class InteractiveEditorWidget(QWidget):
         has_mask = self.labels_layer is not None
         self.enhance_btn.setEnabled(has_image)
         self.empty_mask_btn.setEnabled(has_image and not has_mask)
-        self.auto_mask_btn.setEnabled(has_image and not has_mask)
+        self.auto_mask_btn.setEnabled(has_image)
         self.load_mask_btn.setEnabled(has_image and not has_mask)
         self.density_btn.setEnabled(has_mask)
         self.save_btn.setEnabled(has_image and has_mask)
+        self.btn_skeleton.setEnabled(has_mask)
+        self.btn_remove_small.setEnabled(has_mask)
+        self.btn_dilate.setEnabled(has_mask)
+        self.btn_erode.setEnabled(has_mask)
 
     def _get_current_image_layer(self) -> Optional[napari.layers.Image]:
         if isinstance(self.viewer.layers.selection.active, napari.layers.Image):
@@ -324,6 +379,56 @@ class InteractiveEditorWidget(QWidget):
         )
         enhanced_layer.metadata["is_preprocessed"] = True
         self.viewer.layers.selection.active = enhanced_layer
+
+    def _get_mask_data(self):
+        """Helper to get current mask data safely."""
+        if self.labels_layer is None:
+            return None
+        return np.asarray(self.labels_layer.data)
+
+    def _update_mask_data(self, new_data):
+        """Helper to push new data to the layer and refresh."""
+        if self.labels_layer is not None:
+            self.labels_layer.data = new_data
+            self.labels_layer.refresh()
+
+    def _on_remove_small_objects(self):
+        mask = self._get_mask_data()
+        if mask is None: return
+        
+        min_size = self.spin_min_size.value()
+        new_mask = remove_small_objects(mask, min_size)
+        self._update_mask_data(new_mask)
+        print(f"[INFO] Removed objects smaller than {min_size} pixels.")
+
+    def _on_skeletonize(self):
+        mask = self._get_mask_data()
+        if mask is None: return
+        
+        # Skeletonization is destructive (you lose thickness).
+        # It is usually good to warn the user or perform it on a copy,
+        # but here we apply it to the active layer.
+        new_mask = skeletonize_mask(mask)
+        self._update_mask_data(new_mask)
+        print("[INFO] Mask skeletonized.")
+
+    def _on_dilate(self):
+        mask = self._get_mask_data()
+        if mask is None: return
+        
+        r = self.spin_radius.value()
+        new_mask = dilate_mask(mask, r)
+        self._update_mask_data(new_mask)
+        print(f"[INFO] Dilated mask by {r} pixels.")
+
+    def _on_erode(self):
+        mask = self._get_mask_data()
+        if mask is None: return
+        
+        r = self.spin_radius.value()
+        new_mask = erode_mask(mask, r)
+        self._update_mask_data(new_mask)
+        print(f"[INFO] Eroded mask by {r} pixels.")
 
     def compute_laticifer_density(self) -> None:
         if self.labels_layer is None:

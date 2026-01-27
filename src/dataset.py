@@ -31,7 +31,7 @@ def ensure_dataset_root(
         src = getattr(current_image_layer, "source", None)
         if src is not None and getattr(src, "path", None):
             try:
-                img_path = _Path(src.path)
+                img_path = Path(src.path)
             except Exception:
                 img_path = None
 
@@ -39,7 +39,7 @@ def ensure_dataset_root(
             for key in ("source", "filename", "file_name", "file_path"):
                 if key in current_image_layer.metadata:
                     try:
-                        img_path = _Path(current_image_layer.metadata[key])
+                        img_path = Path(current_image_layer.metadata[key])
                         break
                     except Exception:
                         continue
@@ -61,7 +61,7 @@ def ensure_dataset_root(
         if not directory:
             return None
 
-        candidate = _Path(directory)
+        candidate = Path(directory)
 
         p = candidate
         climbed = False
