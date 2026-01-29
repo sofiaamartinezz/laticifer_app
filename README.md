@@ -1,5 +1,3 @@
-Here is the updated `README.md` reflecting the new directory structure (`src/`), the new features (Batch Processing, Post-processing, Tissue Masking), and the new distribution methods.
-
 # Laticifer Annotation App
 
 A comprehensive desktop tool built on [napari](https://napari.org/) for segmenting, refining, and quantifying laticifer structures in plant microscopy images. It supports both interactive "Human-in-the-Loop" annotation and high-throughput batch processing.
