@@ -30,14 +30,15 @@ import sys
 sys.path.append(str(Path(__file__).parent / "utils"))
 
 from utils.preprocessing import apply_clahe
-from utils.quantification import (
-    analyze_density_pixel_ratio,
-    analyze_density_transect,
-)
+from utils.quantification import analyze_density_pixel_ratio
 from utils.postprocessing import (
-    fill_small_holes, remove_small_objects,
+    remove_small_objects,
     dilate_mask, erode_mask, skeletonize_mask
 )
+
+from batch_processing import run_batch_processing, write_batch_results_csv
+
+from transect_controller import TransectController
 
 
 # -----------------------------------------------------------------------------
@@ -109,7 +110,7 @@ class QuantificationDialog(QDialog):
 # -----------------------------------------------------------------------------
 class InteractiveEditorWidget(QWidget):
     """
-    The original interactive annotation UI.
+    The original interactive annotation UI, extended with editable transects.
     """
     def __init__(self, viewer: napari.Viewer) -> None:
         super().__init__()
@@ -126,6 +127,12 @@ class InteractiveEditorWidget(QWidget):
         self.last_density_percent = None
         self.last_transect_num_lines = 10
         self.last_transect_direction = "horizontal"
+
+        # Transect controller (manages editable transect lines in napari)
+        self._transect_ctrl = TransectController(
+            viewer=self.viewer,
+            on_state_change=self._refresh_transect_ui,
+        )
 
         self._build_ui()
 
@@ -176,55 +183,46 @@ class InteractiveEditorWidget(QWidget):
         refine_group = QGroupBox("Mask Refinement")
         refine_layout = QVBoxLayout()
 
-        # Row 1: Cleaning Tools (Remove Small & Keep Largest)
+        # Row 1: Remove small objects
         row_clean = QHBoxLayout()
-        
-        # Remove Small Objects (Existing)
         self.spin_min_size = QSpinBox()
         self.spin_min_size.setRange(1, 10000)
         self.spin_min_size.setValue(100)
         self.spin_min_size.setSuffix(" px")
         self.spin_min_size.setToolTip("Remove objects smaller than this")
-        
         self.btn_remove_small = QPushButton("Remove Small")
         self.btn_remove_small.clicked.connect(self._on_remove_small_objects)
         self.btn_remove_small.setEnabled(False)
-        
         row_clean.addWidget(self.spin_min_size)
         row_clean.addWidget(self.btn_remove_small)
         refine_layout.addLayout(row_clean)
 
-        # Row 2: Topology (Skeletonize) -- REPLACED FILL HOLES
+        # Row 2: Topology (Skeletonize)
         row_topo = QHBoxLayout()
         self.btn_skeleton = QPushButton("Skeletonize")
         self.btn_skeleton.setToolTip("Reduce mask to 1-pixel wide centerlines")
         self.btn_skeleton.clicked.connect(self._on_skeletonize)
         self.btn_skeleton.setEnabled(False)
-        
-        # Optional: Add a label or spacer to fill the row
         row_topo.addWidget(QLabel("Topology:"))
         row_topo.addWidget(self.btn_skeleton)
         refine_layout.addLayout(row_topo)
 
-        # Row 3: Morphology (Dilate/Erode) -- SAME AS BEFORE
+        # Row 3: Morphology (Dilate/Erode)
         row_morph = QHBoxLayout()
         self.spin_radius = QSpinBox()
         self.spin_radius.setRange(1, 20)
         self.spin_radius.setValue(1)
         self.spin_radius.setSuffix(" px")
-        
-        self.btn_dilate = QPushButton("Dilate")
-        self.btn_dilate.clicked.connect(self._on_dilate)
-        self.btn_dilate.setEnabled(False)
-
         self.btn_erode = QPushButton("Erode")
         self.btn_erode.clicked.connect(self._on_erode)
         self.btn_erode.setEnabled(False)
-
+        self.btn_dilate = QPushButton("Dilate")
+        self.btn_dilate.clicked.connect(self._on_dilate)
+        self.btn_dilate.setEnabled(False)
         row_morph.addWidget(QLabel("Radius:"))
         row_morph.addWidget(self.spin_radius)
-        row_morph.addWidget(self.btn_dilate)
         row_morph.addWidget(self.btn_erode)
+        row_morph.addWidget(self.btn_dilate)
         refine_layout.addLayout(row_morph)
 
         refine_group.setLayout(refine_layout)
@@ -232,13 +230,44 @@ class InteractiveEditorWidget(QWidget):
 
         layout.addSpacing(15)
 
-        # Quantification
+        # ----------------------------------------------------------------
+        # Quantification group — extended with editable transect controls
+        # ----------------------------------------------------------------
         quant_group = QGroupBox("Quantification")
         quant_layout = QVBoxLayout()
+
+        # Original "Calculate density" button (opens dialog, pixel ratio or
+        # auto-generated transects — kept for backwards compatibility)
         self.density_btn = QPushButton("Calculate laticifer density")
+        self.density_btn.setStyleSheet("font-weight: bold;")
         self.density_btn.clicked.connect(self.compute_laticifer_density)
         self.density_btn.setEnabled(False)
         quant_layout.addWidget(self.density_btn)
+
+        quant_layout.addSpacing(6)
+        quant_layout.addWidget(_h_rule())  # thin separator
+
+        # --- Editable transects sub-section ---
+        # Generation is triggered from "Calculate laticifer density" (transect method).
+        # To delete lines: select the "Transect lines" layer, click a line, press Delete.
+        quant_layout.addWidget(QLabel("<b>Editable transects</b>"))
+
+        # Pending indicator (shown after the user edits lines)
+        self._pending_lbl = QLabel("\u26a0 Changes pending recalculations")
+        self._pending_lbl.setStyleSheet("color: orange; font-style: italic;")
+        self._pending_lbl.setVisible(False)
+        quant_layout.addWidget(self._pending_lbl)
+
+        # Button: Recalculate density
+        self._recalc_btn = QPushButton("Recalculate density with transects")
+        self._recalc_btn.setToolTip(
+            "Recalculate using the current (possibly edited) transect geometry.\n"
+            "Lines are NOT regenerated."
+        )
+        self._recalc_btn.clicked.connect(self._on_recalculate_density)
+        self._recalc_btn.setEnabled(False)
+        quant_layout.addWidget(self._recalc_btn)
+
         quant_group.setLayout(quant_layout)
         layout.addWidget(quant_group)
 
@@ -253,7 +282,10 @@ class InteractiveEditorWidget(QWidget):
         layout.addStretch()
         self.setLayout(layout)
 
-    # --- Layer Events ---
+    # ------------------------------------------------------------------
+    # Layer Events
+    # ------------------------------------------------------------------
+
     def _on_layer_inserted(self, event) -> None:
         layer = event.value
         if isinstance(layer, napari.layers.Labels):
@@ -287,6 +319,21 @@ class InteractiveEditorWidget(QWidget):
         self.btn_remove_small.setEnabled(has_mask)
         self.btn_dilate.setEnabled(has_mask)
         self.btn_erode.setEnabled(has_mask)
+        self._refresh_transect_ui()
+
+    def _refresh_transect_ui(self) -> None:
+        """
+        Called by TransectController whenever transect state changes.
+        Enables Recalcular densidad when transects exist.
+        Pending label is shown only after the user edits lines (not on first generate).
+        """
+        has_transects = self._transect_ctrl.has_transects
+        self._recalc_btn.setEnabled(has_transects)
+        self._pending_lbl.setVisible(self._transect_ctrl.pending)
+
+    # ------------------------------------------------------------------
+    # Image/mask helpers (unchanged from original)
+    # ------------------------------------------------------------------
 
     def _get_current_image_layer(self) -> Optional[napari.layers.Image]:
         if isinstance(self.viewer.layers.selection.active, napari.layers.Image):
@@ -305,7 +352,10 @@ class InteractiveEditorWidget(QWidget):
             return self.base_image_layer
         return self._get_current_image_layer()
 
-    # --- Actions ---
+    # ------------------------------------------------------------------
+    # Actions — mask creation (unchanged)
+    # ------------------------------------------------------------------
+
     def create_empty_mask(self) -> None:
         image_layer = self._get_original_image_layer()
         if image_layer is None:
@@ -381,13 +431,11 @@ class InteractiveEditorWidget(QWidget):
         self.viewer.layers.selection.active = enhanced_layer
 
     def _get_mask_data(self):
-        """Helper to get current mask data safely."""
         if self.labels_layer is None:
             return None
         return np.asarray(self.labels_layer.data)
 
     def _update_mask_data(self, new_data):
-        """Helper to push new data to the layer and refresh."""
         if self.labels_layer is not None:
             self.labels_layer.data = new_data
             self.labels_layer.refresh()
@@ -395,7 +443,6 @@ class InteractiveEditorWidget(QWidget):
     def _on_remove_small_objects(self):
         mask = self._get_mask_data()
         if mask is None: return
-        
         min_size = self.spin_min_size.value()
         new_mask = remove_small_objects(mask, min_size)
         self._update_mask_data(new_mask)
@@ -404,10 +451,6 @@ class InteractiveEditorWidget(QWidget):
     def _on_skeletonize(self):
         mask = self._get_mask_data()
         if mask is None: return
-        
-        # Skeletonization is destructive (you lose thickness).
-        # It is usually good to warn the user or perform it on a copy,
-        # but here we apply it to the active layer.
         new_mask = skeletonize_mask(mask)
         self._update_mask_data(new_mask)
         print("[INFO] Mask skeletonized.")
@@ -415,7 +458,6 @@ class InteractiveEditorWidget(QWidget):
     def _on_dilate(self):
         mask = self._get_mask_data()
         if mask is None: return
-        
         r = self.spin_radius.value()
         new_mask = dilate_mask(mask, r)
         self._update_mask_data(new_mask)
@@ -424,11 +466,14 @@ class InteractiveEditorWidget(QWidget):
     def _on_erode(self):
         mask = self._get_mask_data()
         if mask is None: return
-        
         r = self.spin_radius.value()
         new_mask = erode_mask(mask, r)
         self._update_mask_data(new_mask)
         print(f"[INFO] Eroded mask by {r} pixels.")
+
+    # ------------------------------------------------------------------
+    # Quantification — original (pixel ratio + auto transects)
+    # ------------------------------------------------------------------
 
     def compute_laticifer_density(self) -> None:
         if self.labels_layer is None:
@@ -444,11 +489,8 @@ class InteractiveEditorWidget(QWidget):
 
         params = dlg.get_params()
 
-        # -------------------------------------------------
-        # PIXEL RATIO (Whole image vs Tissue-only)
-        # -------------------------------------------------
+        # --- PIXEL RATIO ---
         if params["method"] == "pixel_ratio":
-            # Better choice dialog
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Question)
             msg.setWindowTitle("Density calculation area")
@@ -461,26 +503,19 @@ class InteractiveEditorWidget(QWidget):
             msg.setStandardButtons(QMessageBox.Cancel)
             btn_whole = msg.addButton("Whole image", QMessageBox.AcceptRole)
             btn_tissue = msg.addButton("Tissue only (auto)", QMessageBox.AcceptRole)
-
-            # Default selection (tissue is usually safer if there is background)
             msg.setDefaultButton(btn_tissue)
-
             msg.exec_()
             if msg.clickedButton() == msg.button(QMessageBox.Cancel):
                 return
 
             use_tissue_mask = (msg.clickedButton() == btn_tissue)
-
-            # Compute stats
             stats = analyze_density_pixel_ratio(mask, use_tissue_mask=use_tissue_mask)
 
-            # Show tissue mask overlay only if used
             if use_tissue_mask:
                 debug_mask = stats.get("debug_tissue_mask")
                 if debug_mask is not None:
                     if "Computed Tissue Area" in self.viewer.layers:
                         self.viewer.layers.remove("Computed Tissue Area")
-
                     tissue_layer = self.viewer.add_labels(
                         debug_mask,
                         name="Computed Tissue Area",
@@ -490,16 +525,12 @@ class InteractiveEditorWidget(QWidget):
                     tissue_layer.editable = False
                     if self.labels_layer is not None:
                         self.viewer.layers.selection.active = self.labels_layer
-                    print("[DEBUG] Tissue mask added to viewer.")
             else:
-                # If user chose whole image, remove old debug layer if present
                 if "Computed Tissue Area" in self.viewer.layers:
                     self.viewer.layers.remove("Computed Tissue Area")
 
-            # Store + report
             self.last_density_ratio = float(stats["pixel_ratio"])
             self.last_density_percent = float(stats["density_percentage"])
-
             denom_text = "Detected tissue area" if use_tissue_mask else "Total image area"
             QMessageBox.information(
                 self,
@@ -508,31 +539,70 @@ class InteractiveEditorWidget(QWidget):
                 f"(Laticifers / {denom_text})"
             )
 
-        # -------------------------------------------------
-        # TRANSECT METHOD (unchanged)
-        # -------------------------------------------------
+        # --- TRANSECT ---
+        # Generate lines via the controller so they become immediately editable.
+        # The controller stores the geometry; recalculate reuses it without regenerating.
         else:
             direction = str(params["direction"]).lower().strip()
             num_lines = max(1, int(params.get("num_lines", 10)))
             self.last_transect_num_lines = num_lines
             self.last_transect_direction = direction
 
-            stats, lines, pts = analyze_density_transect(
-                mask, num_lines=num_lines, direction=direction
+            mask_shape = tuple(mask.shape[:2])
+
+            # 1. Generate editable lines in the controller (renders the Shapes layer)
+            self._transect_ctrl.generate(
+                mask_shape=mask_shape,
+                num_lines=num_lines,
+                direction=direction,
             )
 
-            # Visualize lines/points
-            if "Transect lines" in self.viewer.layers:
-                self.viewer.layers.remove("Transect lines")
-            self.viewer.add_shapes(lines, name="Transect lines", shape_type="line", edge_width=2)
+            # 2. Immediately calculate density on the freshly generated geometry
+            show_pts = bool(params.get("show_points", True))
+            stats = self._transect_ctrl.recalculate(mask, show_points=show_pts)
 
-            if "Intersection points" in self.viewer.layers:
-                self.viewer.layers.remove("Intersection points")
-            if bool(params.get("show_points", True)):
-                self.viewer.add_points(pts, name="Intersection points", size=6)
-
-            mean = stats.get("mean_intersections_per_line", float("nan"))
+            mean = stats.get("mean_intersections_per_line", float("nan")) if stats else float("nan")
             QMessageBox.information(self, "Transect Results", f"Mean intersections: {mean:.2f}")
+
+    # ------------------------------------------------------------------
+    # New editable-transect actions
+    # ------------------------------------------------------------------
+
+    def _on_recalculate_density(self) -> None:
+        """
+        Recalculate transect density using the CURRENT line geometry.
+
+        Lines are NOT regenerated — any manual moves/deletions are preserved.
+        Updates the JSON-compatible stats stored on this widget and shows results.
+        """
+        if self.labels_layer is None:
+            QMessageBox.warning(self, "No mask", "Create or load a mask first.")
+            return
+
+        if not self._transect_ctrl.has_transects:
+            QMessageBox.warning(
+                self, "No transects", "Generate transects first."
+            )
+            return
+
+        mask = np.asarray(self.labels_layer.data)
+        stats = self._transect_ctrl.recalculate(mask, show_points=True)
+
+        if stats is None:
+            QMessageBox.warning(self, "Error", "Recalculation failed.")
+            return
+
+        # Store results for save_annotation
+        mean = stats.get("mean_intersections_per_line", float("nan"))
+        self.last_transect_num_lines = int(stats.get("num_lines", self.last_transect_num_lines))
+        self.last_transect_direction = str(stats.get("direction", self.last_transect_direction))
+        stats["transects_edited"] = True
+
+        QMessageBox.information(self, "Transect Results", f"Mean intersections: {mean:.2f}")
+
+    # ------------------------------------------------------------------
+    # Save (unchanged — no new JSON keys required)
+    # ------------------------------------------------------------------
 
     def save_annotation(self) -> None:
         image_layer = self._get_original_image_layer()
@@ -552,8 +622,22 @@ class InteractiveEditorWidget(QWidget):
             transect_direction=getattr(self, "last_transect_direction", "both"),
         )
 
+
 # -----------------------------------------------------------------------------
-#  WIDGET: Batch Processing (Multiple Images)
+#  Utility: thin horizontal rule widget
+# -----------------------------------------------------------------------------
+
+def _h_rule() -> QWidget:
+    """A thin horizontal line used as a visual separator inside layouts."""
+    from qtpy.QtWidgets import QFrame
+    line = QFrame()
+    line.setFrameShape(QFrame.HLine)
+    line.setFrameShadow(QFrame.Sunken)
+    return line
+
+
+# -----------------------------------------------------------------------------
+#  WIDGET: Batch Processing (Multiple Images) — unchanged
 # -----------------------------------------------------------------------------
 class BatchProcessingWidget(QWidget):
     def __init__(self):
@@ -562,7 +646,7 @@ class BatchProcessingWidget(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout()
-        
+
         # Input
         self.input_dir_edit = QLineEdit()
         self.input_dir_edit.setPlaceholderText("Select input folder...")
@@ -592,20 +676,24 @@ class BatchProcessingWidget(QWidget):
 
         # Run
         self.run_btn = QPushButton("Start Batch Processing")
-        self.run_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;")
+        self.run_btn.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;"
+        )
         self.run_btn.clicked.connect(self._start_batch)
         layout.addWidget(self.run_btn)
-        
+
         layout.addStretch()
         self.setLayout(layout)
 
     def _select_input(self):
         d = QFileDialog.getExistingDirectory(self, "Select Input")
-        if d: self.input_dir_edit.setText(d)
+        if d:
+            self.input_dir_edit.setText(d)
 
     def _select_output(self):
         d = QFileDialog.getExistingDirectory(self, "Select Output")
-        if d: self.output_dir_edit.setText(d)
+        if d:
+            self.output_dir_edit.setText(d)
 
     def _start_batch(self):
         in_d = self.input_dir_edit.text()
@@ -616,8 +704,7 @@ class BatchProcessingWidget(QWidget):
 
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Processing...")
-        
-        # Launch worker
+
         worker = self.run_batch_logic(in_d, out_d)
         worker.yielded.connect(self._on_progress)
         worker.finished.connect(self._on_finished)
@@ -634,58 +721,27 @@ class BatchProcessingWidget(QWidget):
         self.status_lbl.setText("Complete!")
         self.run_btn.setEnabled(True)
         self.run_btn.setText("Start Batch Processing")
-        QMessageBox.information(self, "Done", "Batch processing complete.\nSee 'batch_results.csv' in output folder.")
+        QMessageBox.information(
+            self,
+            "Done",
+            "Batch processing complete.\nSee 'batch_results.csv' in output folder."
+        )
 
-    # --- Background Worker ---
     @thread_worker
     def run_batch_logic(self, in_dir_str, out_dir_str):
-        import pandas as pd
-        from pathlib import Path
-        # Local imports to avoid circular issues
-        from model import predict_laticifer_mask
-        from utils.quantification import analyze_density_pixel_ratio, analyze_density_transect
-        from utils.preprocessing import apply_clahe
-
-        in_path = Path(in_dir_str)
-        out_path = Path(out_dir_str)
-        masks_out = out_path / "masks"
-        masks_out.mkdir(parents=True, exist_ok=True)
-
-        files = []
-        for ext in ['*.tif', '*.tiff', '*.jpg', '*.png']:
-            files.extend(list(in_path.glob(ext)))
-        
         results = []
-        total = len(files)
+        for curr, total, name, row in run_batch_processing(
+            in_dir_str,
+            out_dir_str,
+            num_lines=10,
+        ):
+            yield (curr, total, name)
+            results.append(row)
+        write_batch_results_csv(out_dir_str, results)
 
-        for i, f in enumerate(files):
-            yield (i + 1, total, f.name)
-            try:
-                img = skio.imread(f)
-                img_enh = apply_clahe(img) # Ensure enhancement is applied
-                mask = predict_laticifer_mask(img_enh)
-                
-                # Metrics
-                px = analyze_density_pixel_ratio(mask)
-                tr, _, _ = analyze_density_transect(mask, num_lines=10, direction="both")
-                
-                # Save mask
-                mask_name = f"{f.stem}_mask.tif"
-                skio.imsave(masks_out / mask_name, (mask * 255).astype(np.uint8))
-                
-                results.append({
-                    "filename": f.name,
-                    "density_percent": px["density_percentage"],
-                    "transect_mean_intersections": tr.get("mean_intersections_per_line", "")
-                })
-            except Exception as e:
-                print(f"Error on {f.name}: {e}")
-
-        if results:
-            pd.DataFrame(results).to_csv(out_path / "batch_results.csv", index=False)
 
 # -----------------------------------------------------------------------------
-#  MAIN WIDGET: Combined Tabs
+#  MAIN WIDGET: Combined Tabs — unchanged
 # -----------------------------------------------------------------------------
 class LaticiferAnnotationWidget(QWidget):
     def __init__(self, viewer: napari.Viewer) -> None:

@@ -31,7 +31,7 @@ def main():
             pass
 
     # --- 2. LAUNCH VIEWER ---
-    viewer = napari.Viewer(title="LaticiferSegmentationApp")
+    viewer = napari.Viewer(title="LatexLens")
 
     # --- 3. SET THE ICON ---
     current_dir = Path(__file__).parent
