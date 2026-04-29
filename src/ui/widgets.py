@@ -16,7 +16,7 @@ from qtpy.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget, QLineEdit, QProgressBar,
 )
 
-from model import predict_laticifer_mask
+from model.predictor import predict_laticifer_mask
 from data.io import infer_mask_path, load_mask
 from data.annotations import ensure_dataset_root, save_annotation
 from data.batch import run_batch_processing, write_batch_csv
