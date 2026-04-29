@@ -1,29 +1,84 @@
 # ui/transect_controller.py
 """
-TransectController: bridges napari viewer with transect logic.
+TransectController: manages editable transect lines in a napari viewer.
 
 Design:
-- generate(): creates the Shapes layer (lines on top, no points yet).
+- generate(): computes centered positions and creates the Shapes layer.
               Listens to layer.events.data to detect user deletions → pending flag.
 - recalculate(): reads whatever lines exist in the Shapes layer right now,
-                 adds points BELOW the shapes layer, re-selects shapes.
-- pending flag: False after generate/recalculate, True only after user edits.
+                 adds intersection points below the shapes layer, re-selects shapes.
+- pending flag: True after generate or user edits, False after recalculate.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
+
 import numpy as np
-
 import napari
-from napari.layers import Shapes, Points
+from napari.layers import Shapes
 
-from utils.transect_manager import TransectManager
 from utils.quantification import analyze_density_from_lines
 
 
 TRANSECT_LAYER_NAME = "Transect lines"
-POINTS_LAYER_NAME = "Intersection points"
+POINTS_LAYER_NAME   = "Intersection points"
 
+
+# -----------------------------------------------------------------------------
+#  Position generation
+# -----------------------------------------------------------------------------
+
+@dataclass
+class _TransectLine:
+    direction: str       # 'horizontal' | 'vertical'
+    coords: np.ndarray   # (2, 2) float [[y0, x0], [y1, x1]]
+
+    def __post_init__(self):
+        self.coords = np.asarray(self.coords, dtype=float)
+        assert self.coords.shape == (2, 2), "coords must be (2, 2)"
+
+
+def _generate_lines(
+    image_shape: Tuple[int, int],
+    num_lines: int,
+    direction: str,
+) -> List[np.ndarray]:
+    """
+    Return (2, 2) coordinate arrays for centered, equidistant transects.
+
+    Formula: pos_i = (i + 0.5) * L / n
+    Lines cover the full axis uniformly with no border margin.
+    """
+    H, W = image_shape
+    n = max(1, int(num_lines))
+    direction = (direction or "both").lower().strip()
+    lines: List[_TransectLine] = []
+
+    def _positions(length: int) -> np.ndarray:
+        pos = (np.arange(n, dtype=float) + 0.5) * (float(length) / float(n))
+        return np.clip(np.round(pos).astype(int), 0, max(0, length - 1))
+
+    if direction in ("horizontal", "both"):
+        for y in _positions(H):
+            lines.append(_TransectLine(
+                direction="horizontal",
+                coords=np.array([[float(y), 0.0], [float(y), float(W - 1)]]),
+            ))
+
+    if direction in ("vertical", "both"):
+        for x in _positions(W):
+            lines.append(_TransectLine(
+                direction="vertical",
+                coords=np.array([[0.0, float(x)], [float(H - 1), float(x)]]),
+            ))
+
+    return [l.coords.copy() for l in lines]
+
+
+# -----------------------------------------------------------------------------
+#  Controller
+# -----------------------------------------------------------------------------
 
 class TransectController:
 
@@ -36,42 +91,28 @@ class TransectController:
         self._on_state_change = on_state_change or (lambda: None)
         self.last_stats: Optional[dict] = None
         self._shapes_layer: Optional[Shapes] = None
-        self._manager = TransectManager()
-        self._pending: bool = False  # True only after user edits lines
+        self._pending: bool = False
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(
-        self,
-        mask_shape: Tuple[int, int],
-        num_lines: int,
-        direction: str,
-    ) -> None:
+    def generate(self, mask_shape: Tuple[int, int], num_lines: int, direction: str) -> None:
         """
-        Generate centered, equidistant transect lines and render them.
-        Replaces existing Transect lines and Intersection points layers.
-        pending is reset to False (no edits yet).
+        Generate centered transect lines and render them in a new Shapes layer.
+        Replaces any existing Transect lines and Intersection points layers.
         """
         self._remove_layer(TRANSECT_LAYER_NAME)
         self._remove_layer(POINTS_LAYER_NAME)
-        self._pending = False
 
-        self._manager.generate(
-            image_shape=mask_shape,
-            num_lines=num_lines,
-            direction=direction,
-        )
-        napari_lines = self._manager.get_napari_lines()
-
+        napari_lines = _generate_lines(mask_shape, num_lines, direction)
         if not napari_lines:
             self._shapes_layer = None
+            self._pending = False
             self._on_state_change()
             return
 
-        # Render shapes on top (added last = top of stack).
-        # edge_width=8 so lines are easy to click/select.
+        # edge_width=8 makes lines easy to click and select
         self._shapes_layer = self.viewer.add_shapes(
             napari_lines,
             name=TRANSECT_LAYER_NAME,
@@ -81,24 +122,16 @@ class TransectController:
         )
         self._shapes_layer.mode = "select"
         self.viewer.layers.selection.active = self._shapes_layer
-
-        # Detect user deletions/additions via the data event → show pending warning
         self._shapes_layer.events.data.connect(self._on_shapes_data_changed)
 
-        self._on_state_change()
-
-    def _on_shapes_data_changed(self, event=None) -> None:
-        """Called by napari when the user deletes or adds a shape. Sets pending."""
         self._pending = True
         self._on_state_change()
 
     def recalculate(self, mask: np.ndarray, show_points: bool = True) -> Optional[dict]:
         """
         Recalculate density from whatever lines currently exist in the Shapes layer.
-        Points are added below shapes; shapes layer is re-selected after.
-        pending is reset to False after a successful recalculate.
+        Lines are NOT regenerated — user deletions are preserved.
         """
-        # Remove old points before re-adding (so they go below shapes in the stack)
         self._remove_layer(POINTS_LAYER_NAME)
 
         lines = self._read_lines_from_layer()
@@ -110,17 +143,14 @@ class TransectController:
         self.last_stats = stats
 
         if show_points and pts.shape[0] > 0:
-            # 1. Add points — they land on top of the stack momentarily
             self.viewer.add_points(pts, name=POINTS_LAYER_NAME, size=6, face_color="yellow")
-
-            # 2. Move shapes layer above points so transects stay on top
+            # Keep shapes on top and active so the user can keep editing
             shapes = self._find_shapes_layer()
             if shapes is not None:
-                current_idx = self.viewer.layers.index(shapes)
-                top_idx = len(self.viewer.layers) - 1
-                if current_idx != top_idx:
-                    self.viewer.layers.move(current_idx, top_idx)
-                # Re-activate shapes so user can keep editing
+                idx = self.viewer.layers.index(shapes)
+                top = len(self.viewer.layers) - 1
+                if idx != top:
+                    self.viewer.layers.move(idx, top)
                 self.viewer.layers.selection.active = shapes
 
         self._pending = False
@@ -136,8 +166,13 @@ class TransectController:
         return len(self._read_lines_from_layer()) > 0
 
     # ------------------------------------------------------------------
-    # Reading lines from napari layer
+    # Internal
     # ------------------------------------------------------------------
+
+    def _on_shapes_data_changed(self, event=None) -> None:
+        """Fired by napari when the user deletes or adds a shape."""
+        self._pending = True
+        self._on_state_change()
 
     def _read_lines_from_layer(self) -> List[np.ndarray]:
         layer = self._find_shapes_layer()
@@ -159,28 +194,17 @@ class TransectController:
                 return layer
         return None
 
-    # ------------------------------------------------------------------
-    # Classifying lines
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _classify_lines(
         lines: List[np.ndarray],
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        h_lines: List[np.ndarray] = []
-        v_lines: List[np.ndarray] = []
+        """Split lines into horizontal / vertical by comparing dy vs dx."""
+        h_lines, v_lines = [], []
         for coords in lines:
             dy = abs(float(coords[1, 0]) - float(coords[0, 0]))
             dx = abs(float(coords[1, 1]) - float(coords[0, 1]))
-            if dx >= dy:
-                h_lines.append(coords)
-            else:
-                v_lines.append(coords)
+            (h_lines if dx >= dy else v_lines).append(coords)
         return h_lines, v_lines
-
-    # ------------------------------------------------------------------
-    # Layer helpers
-    # ------------------------------------------------------------------
 
     def _remove_layer(self, name: str) -> None:
         if name in self.viewer.layers:

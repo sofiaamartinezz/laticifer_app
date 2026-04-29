@@ -1,89 +1,99 @@
 # utils/quantification.py
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-
-from skimage.morphology import convex_hull_image, binary_closing, disk, binary_dilation, binary_erosion
+from skimage.morphology import convex_hull_image, disk, binary_dilation, binary_erosion
 from scipy import ndimage as ndi
 from skimage.transform import rescale, resize
 
-def generate_structure_based_tissue_mask(laticifer_mask: np.ndarray, method: str = 'envelope') -> np.ndarray:
+
+# -----------------------------------------------------------------------------
+#  Tissue mask generation
+# -----------------------------------------------------------------------------
+
+def generate_structure_based_tissue_mask(
+    laticifer_mask: np.ndarray,
+    method: str = "envelope",
+) -> np.ndarray:
     """
-    Generates a tissue mask based solely on the location of laticifers.
-    
+    Estimate the tissue area from the spatial distribution of laticifers.
+
     Args:
         laticifer_mask: Binary mask of laticifers.
-        method: 'hull' (Convex Hull) or 'envelope' (Morphological closing/filling).
+        method: 'hull' (convex hull) or 'envelope' (morphological shrink-wrap).
+
+    Returns:
+        Binary uint8 mask of the estimated tissue region.
     """
-    scale_factor = 0.25
     original_shape = laticifer_mask.shape
-    
-    small_mask = rescale(laticifer_mask, scale_factor, order=0, anti_aliasing=False).astype(bool)
-    
+    # Downscale to 25 % for speed on large images; sufficient for a tissue boundary.
+    small_mask = rescale(laticifer_mask, 0.25, order=0, anti_aliasing=False).astype(bool)
+
     if not np.any(small_mask):
         return np.zeros(original_shape, dtype=np.uint8)
 
-    if method == 'hull':
+    if method == "hull":
         tissue_small = convex_hull_image(small_mask)
-        
     else:
-        radius = 25 
-        structure = disk(radius)
-        dilated = binary_dilation(small_mask, structure)
-        filled = ndi.binary_fill_holes(dilated)
-        tissue_small = binary_erosion(filled, structure)
+        # Dilate to bridge gaps, fill enclosed regions, then erode back.
+        structure = disk(25)  # 25 px at 0.25 scale ≈ 100 px at full scale
+        tissue_small = binary_erosion(
+            ndi.binary_fill_holes(binary_dilation(small_mask, structure)),
+            structure,
+        )
 
-    tissue_mask = resize(tissue_small, original_shape, order=0, anti_aliasing=False)
-    
-    return tissue_mask.astype(np.uint8)
+    return resize(tissue_small, original_shape, order=0, anti_aliasing=False).astype(np.uint8)
 
 
-# ----------------------------
-# pixel ratio
-# ----------------------------
+# -----------------------------------------------------------------------------
+#  Pixel-ratio density
+# -----------------------------------------------------------------------------
+
 def analyze_density_pixel_ratio(
-    mask: np.ndarray, 
+    mask: np.ndarray,
     roi: Optional[Tuple[slice, slice]] = None,
-    use_tissue_mask: bool = False
+    use_tissue_mask: bool = False,
 ) -> Dict[str, object]:
-    
-    data = mask
-    if roi is not None:
-        ysl, xsl = roi
-        data = data[ysl, xsl]
+    """
+    Compute laticifer density as a pixel fraction.
 
+    Args:
+        mask:            Label mask (values > 0 are laticifers).
+        roi:             Optional (y_slice, x_slice) crop.
+        use_tissue_mask: If True, denominator is the auto-detected tissue area.
+
+    Returns:
+        Dict with keys: laticifer_pixels, total_pixels, pixel_ratio,
+        density_percentage, debug_tissue_mask.
+    """
+    data = mask if roi is None else mask[roi[0], roi[1]]
     laticifer_pixels = int(np.count_nonzero(data > 0))
-    
-    generated_mask_for_debug = None 
+    debug_tissue_mask = None
 
     if use_tissue_mask:
-        tissue_mask = generate_structure_based_tissue_mask(data, method='hull')
-        generated_mask_for_debug = tissue_mask 
-        total_pixels = int(np.count_nonzero(tissue_mask))
-        total_pixels = max(total_pixels, laticifer_pixels)
+        tissue_mask = generate_structure_based_tissue_mask(data, method="hull")
+        debug_tissue_mask = tissue_mask
+        total_pixels = max(int(np.count_nonzero(tissue_mask)), laticifer_pixels)
     else:
         total_pixels = int(data.size)
 
-    if total_pixels == 0:
-        ratio = 0.0
-    else:
-        ratio = laticifer_pixels / total_pixels
+    ratio = laticifer_pixels / total_pixels if total_pixels > 0 else 0.0
 
     return {
         "laticifer_pixels": laticifer_pixels,
         "total_pixels": total_pixels,
         "pixel_ratio": float(ratio),
         "density_percentage": float(ratio * 100.0),
-        "debug_tissue_mask": generated_mask_for_debug
+        "debug_tissue_mask": debug_tissue_mask,
     }
 
 
-# ==========================================================
-# transect function  (original — generates lines internally)
-# ==========================================================
+# -----------------------------------------------------------------------------
+#  Transect density — auto-generated lines (used by batch processing and save)
+# -----------------------------------------------------------------------------
+
 def analyze_density_transect(
     mask: np.ndarray,
     num_lines: int = 10,
@@ -91,18 +101,28 @@ def analyze_density_transect(
     roi: Optional[Tuple[slice, slice]] = None,
 ) -> Tuple[Dict[str, float], List[np.ndarray], np.ndarray]:
     """
-    Calculate transect density with auto-generated lines.
+    Compute transect density with auto-generated, uniformly distributed lines.
 
-    Lines are placed at pos_i = (i + 0.5) * L / n — uniformly distributed
-    across the full axis with no border margin.
+    Position formula: pos_i = (i + 0.5) * L / n
+    Lines cover the full axis with no border margin.
+
+    Args:
+        mask:      Label mask (binarised internally as > 0).
+        num_lines: Number of lines per direction.
+        direction: 'horizontal', 'vertical', or 'both'.
+        roi:       Optional (y_slice, x_slice) crop.
+
+    Returns:
+        stats: Dict with mean/std intersections per line and per direction.
+        lines: List of (2, 2) arrays for a napari Shapes layer.
+        pts:   (N, 2) float array of 0→1 entry points (y, x).
     """
     if mask.size == 0:
         return {"error": "Empty mask"}, [], np.zeros((0, 2), dtype=float)
 
     mask_bin = (mask > 0).astype(np.uint8)
 
-    y_off = 0
-    x_off = 0
+    y_off, x_off = 0, 0
     if roi is not None:
         ysl, xsl = roi
         y_off = ysl.start or 0
@@ -118,197 +138,125 @@ def analyze_density_transect(
         direction = "both"
 
     n = max(1, int(num_lines))
-
     lines: List[np.ndarray] = []
     points: List[Tuple[float, float]] = []
+    h_counts: List[int] = []
+    v_counts: List[int] = []
 
-    horizontal_intersections: List[int] = []
-    vertical_intersections: List[int] = []
+    def _positions(length: int) -> np.ndarray:
+        pos = (np.arange(n, dtype=float) + 0.5) * (float(length) / float(n))
+        return np.clip(np.round(pos).astype(int), 0, max(0, length - 1))
 
-    def _centered_positions(length: int) -> np.ndarray:
-        """n equidistant positions covering the full axis, centred in each segment."""
-        positions = (np.arange(n, dtype=float) + 0.5) * (float(length) / float(n))
-        return np.clip(np.round(positions).astype(int), 0, max(0, length - 1))
-
-    # --- HORIZONTAL ---
     if direction in ("horizontal", "both"):
-        y_positions = _centered_positions(H)
-        for y in y_positions:
-            y = int(np.clip(y, 0, H - 1))
-
+        for y in _positions(H):
+            y = int(y)
             y_g = float(y + y_off)
-            lines.append(np.array([[y_g, float(0 + x_off)], [y_g, float((W - 1) + x_off)]], dtype=float))
-
-            line_pixels = mask_bin[y, :]
-            diffs = np.diff(line_pixels.astype(np.int8))
-
-            num_intersections = int(np.count_nonzero(diffs == 1))
-            horizontal_intersections.append(num_intersections)
-
-            xs = np.where(diffs == 1)[0] + 1
-            for x in xs:
+            lines.append(np.array([[y_g, float(x_off)], [y_g, float(W - 1 + x_off)]], dtype=float))
+            diffs = np.diff(mask_bin[y, :].astype(np.int8))
+            h_counts.append(int(np.count_nonzero(diffs == 1)))
+            for x in np.where(diffs == 1)[0] + 1:
                 points.append((float(y + y_off), float(x + x_off)))
 
-    # --- VERTICAL ---
     if direction in ("vertical", "both"):
-        x_positions = _centered_positions(W)
-        for x in x_positions:
-            x = int(np.clip(x, 0, W - 1))
-
+        for x in _positions(W):
+            x = int(x)
             x_g = float(x + x_off)
-            lines.append(np.array([[float(0 + y_off), x_g], [float((H - 1) + y_off), x_g]], dtype=float))
-
-            line_pixels = mask_bin[:, x]
-            diffs = np.diff(line_pixels.astype(np.int8))
-
-            num_intersections = int(np.count_nonzero(diffs == 1))
-            vertical_intersections.append(num_intersections)
-
-            ys = np.where(diffs == 1)[0] + 1
-            for y in ys:
+            lines.append(np.array([[float(y_off), x_g], [float(H - 1 + y_off), x_g]], dtype=float))
+            diffs = np.diff(mask_bin[:, x].astype(np.int8))
+            v_counts.append(int(np.count_nonzero(diffs == 1)))
+            for y in np.where(diffs == 1)[0] + 1:
                 points.append((float(y + y_off), float(x + x_off)))
 
-    all_intersections = horizontal_intersections + vertical_intersections
-
+    all_counts = h_counts + v_counts
     stats: Dict[str, float] = {
         "num_lines": float(n),
         "direction": direction,
+        "mean_intersections_per_line": float(np.mean(all_counts)) if all_counts else float("nan"),
+        "std_intersections_per_line":  float(np.std(all_counts))  if all_counts else float("nan"),
+        "mean_horizontal_intersections": float(np.mean(h_counts)) if h_counts else float("nan"),
+        "mean_vertical_intersections":   float(np.mean(v_counts)) if v_counts else float("nan"),
     }
-
-    if all_intersections:
-        stats["mean_intersections_per_line"] = float(np.mean(all_intersections))
-        stats["std_intersections_per_line"] = float(np.std(all_intersections))
-    else:
-        stats["mean_intersections_per_line"] = float("nan")
-        stats["std_intersections_per_line"] = float("nan")
-
-    if horizontal_intersections:
-        stats["mean_horizontal_intersections"] = float(np.mean(horizontal_intersections))
-    else:
-        stats["mean_horizontal_intersections"] = float("nan")
-
-    if vertical_intersections:
-        stats["mean_vertical_intersections"] = float(np.mean(vertical_intersections))
-    else:
-        stats["mean_vertical_intersections"] = float("nan")
 
     pts = np.array(points, dtype=float) if points else np.zeros((0, 2), dtype=float)
     return stats, lines, pts
 
 
-# ==========================================================
-# NEW: recalculate density using existing line geometry
-# ==========================================================
+# -----------------------------------------------------------------------------
+#  Transect density — from existing line geometry (editable transects)
+# -----------------------------------------------------------------------------
+
 def analyze_density_from_lines(
     mask: np.ndarray,
     horizontal_lines: List[np.ndarray],
     vertical_lines: List[np.ndarray],
 ) -> Tuple[Dict[str, float], np.ndarray]:
     """
-    Calculate transect density using the *current* geometry of provided lines.
+    Compute transect density from an explicit list of line coordinates.
 
-    This is used when the user has moved or deleted transects manually and
-    clicks "Recalcular densidad" — we must NOT regenerate positions.
+    Used when the user has edited (moved / deleted) transects manually and
+    clicks 'Recalculate density'. Lines are read from the napari Shapes layer
+    directly — no positions are regenerated.
 
     Args:
-        mask:             Raw label mask (binarised internally as > 0).
-        horizontal_lines: List of (2,2) arrays [[y, x0], [y, x1]] (y0 == y1).
-        vertical_lines:   List of (2,2) arrays [[y0, x], [y1, x]] (x0 == x1).
+        mask:             Label mask (binarised internally as > 0).
+        horizontal_lines: List of (2, 2) arrays [[y, x0], [y, x1]].
+        vertical_lines:   List of (2, 2) arrays [[y0, x], [y1, x]].
 
     Returns:
-        stats:  Dict with mean/std intersections (same keys as analyze_density_transect).
-        pts:    (N, 2) float array of entry points (y, x) for napari Points layer.
-
-    Notes:
-        - Lines are expected in napari global coordinates (no ROI offset here).
-        - Each horizontal line is sampled at its rounded Y coordinate.
-        - Each vertical line is sampled at its rounded X coordinate.
-        - Intersection count: transitions 0→1 in the pixel profile (diffs == 1).
+        stats: Dict with mean/std intersections per line and per direction.
+        pts:   (N, 2) float array of 0→1 entry points (y, x) for napari.
     """
     if mask.size == 0:
-        empty_stats = {
-            "num_lines": 0.0,
-            "direction": "mixed",
-            "mean_intersections_per_line": float("nan"),
-            "std_intersections_per_line": float("nan"),
-            "mean_horizontal_intersections": float("nan"),
-            "mean_vertical_intersections": float("nan"),
-        }
-        return empty_stats, np.zeros((0, 2), dtype=float)
+        return _empty_stats(), np.zeros((0, 2), dtype=float)
 
     mask_bin = (mask > 0).astype(np.uint8)
     H, W = mask_bin.shape[:2]
 
     points: List[Tuple[float, float]] = []
-    horizontal_intersections: List[int] = []
-    vertical_intersections: List[int] = []
+    h_counts: List[int] = []
+    v_counts: List[int] = []
 
-    # --- Process horizontal lines ---
-    for line_coords in horizontal_lines:
-        # line_coords: [[y, x0], [y, x1]]  (y0 == y1 for horizontal)
-        y = int(round(float(line_coords[0, 0])))
-        y = int(np.clip(y, 0, H - 1))
-
-        line_pixels = mask_bin[y, :]
-        diffs = np.diff(line_pixels.astype(np.int8))
-        num_intersections = int(np.count_nonzero(diffs == 1))
-        horizontal_intersections.append(num_intersections)
-
-        xs = np.where(diffs == 1)[0] + 1
-        for x in xs:
+    for coords in horizontal_lines:
+        y = int(np.clip(round(float(coords[0, 0])), 0, H - 1))
+        diffs = np.diff(mask_bin[y, :].astype(np.int8))
+        h_counts.append(int(np.count_nonzero(diffs == 1)))
+        for x in np.where(diffs == 1)[0] + 1:
             points.append((float(y), float(x)))
 
-    # --- Process vertical lines ---
-    for line_coords in vertical_lines:
-        # line_coords: [[y0, x], [y1, x]]  (x0 == x1 for vertical)
-        x = int(round(float(line_coords[0, 1])))
-        x = int(np.clip(x, 0, W - 1))
-
-        line_pixels = mask_bin[:, x]
-        diffs = np.diff(line_pixels.astype(np.int8))
-        num_intersections = int(np.count_nonzero(diffs == 1))
-        vertical_intersections.append(num_intersections)
-
-        ys = np.where(diffs == 1)[0] + 1
-        for y in ys:
+    for coords in vertical_lines:
+        x = int(np.clip(round(float(coords[0, 1])), 0, W - 1))
+        diffs = np.diff(mask_bin[:, x].astype(np.int8))
+        v_counts.append(int(np.count_nonzero(diffs == 1)))
+        for y in np.where(diffs == 1)[0] + 1:
             points.append((float(y), float(x)))
 
-    all_intersections = horizontal_intersections + vertical_intersections
-    total_lines = len(all_intersections)
-
-    # Determine direction label for stats
-    has_h = len(horizontal_intersections) > 0
-    has_v = len(vertical_intersections) > 0
-    if has_h and has_v:
-        direction_label = "both"
-    elif has_h:
-        direction_label = "horizontal"
-    elif has_v:
-        direction_label = "vertical"
-    else:
-        direction_label = "none"
+    all_counts = h_counts + v_counts
+    has_h, has_v = bool(h_counts), bool(v_counts)
+    direction = (
+        "both"       if (has_h and has_v) else
+        "horizontal" if has_h else
+        "vertical"   if has_v else "none"
+    )
 
     stats: Dict[str, float] = {
-        "num_lines": float(total_lines),
-        "direction": direction_label,
+        "num_lines": float(len(all_counts)),
+        "direction": direction,
+        "mean_intersections_per_line": float(np.mean(all_counts)) if all_counts else float("nan"),
+        "std_intersections_per_line":  float(np.std(all_counts))  if all_counts else float("nan"),
+        "mean_horizontal_intersections": float(np.mean(h_counts)) if h_counts else float("nan"),
+        "mean_vertical_intersections":   float(np.mean(v_counts)) if v_counts else float("nan"),
     }
-
-    if all_intersections:
-        stats["mean_intersections_per_line"] = float(np.mean(all_intersections))
-        stats["std_intersections_per_line"] = float(np.std(all_intersections))
-    else:
-        stats["mean_intersections_per_line"] = float("nan")
-        stats["std_intersections_per_line"] = float("nan")
-
-    if horizontal_intersections:
-        stats["mean_horizontal_intersections"] = float(np.mean(horizontal_intersections))
-    else:
-        stats["mean_horizontal_intersections"] = float("nan")
-
-    if vertical_intersections:
-        stats["mean_vertical_intersections"] = float(np.mean(vertical_intersections))
-    else:
-        stats["mean_vertical_intersections"] = float("nan")
 
     pts = np.array(points, dtype=float) if points else np.zeros((0, 2), dtype=float)
     return stats, pts
+
+
+def _empty_stats() -> Dict[str, float]:
+    return {
+        "num_lines": 0.0,
+        "direction": "none",
+        "mean_intersections_per_line": float("nan"),
+        "std_intersections_per_line":  float("nan"),
+        "mean_horizontal_intersections": float("nan"),
+        "mean_vertical_intersections":   float("nan"),
+    }

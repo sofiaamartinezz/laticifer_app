@@ -1,53 +1,44 @@
+# main.py
 """
-Laticifer Annotation App
------------------------
-A simple desktop tool built with napari to help biologists annotate laticifer 
-structures in microscopy images.
-
-Usage:
-    python laticifer_annotation_app.py
+LatexLens — Laticifer Annotation App
+Entry point: launches the napari viewer and attaches the annotation widget.
 """
-
 from __future__ import annotations
-import sys
-import os
+
 import ctypes
+import os
+import sys
 from pathlib import Path
+
 import napari
 from qtpy.QtGui import QIcon
 
-# Ensure we can import your modules
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from ui.widgets import LaticiferAnnotationWidget
 
-from ui import LaticiferAnnotationWidget
 
-def main():
-    # --- 1. WINDOWS TASKBAR FIX ---
-    if os.name == 'nt':
-        myappid = 'upv.latiseg.assist.v1' # Arbitrary string
+def main() -> None:
+    # Windows taskbar icon fix
+    if os.name == "nt":
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "upv.latiseg.assist.v1"
+            )
         except Exception:
             pass
 
-    # --- 2. LAUNCH VIEWER ---
     viewer = napari.Viewer(title="LatexLens")
 
-    # --- 3. SET THE ICON ---
-    current_dir = Path(__file__).parent
-    icon_path = current_dir.parent / "resources" / "app_icon.ico"
-    
+    icon_path = Path(__file__).parent.parent / "resources" / "app_icon.ico"
     if icon_path.exists():
-        # Access the underlying Qt window of Napari
         viewer.window._qt_window.setWindowIcon(QIcon(str(icon_path)))
     else:
-        print(f"Warning: Icon not found at {icon_path}")
+        print(f"[WARN] Icon not found at {icon_path}")
 
-    # --- 4. LOAD WIDGET ---
     widget = LaticiferAnnotationWidget(viewer)
     viewer.window.add_dock_widget(widget, area="right")
-    
+
     napari.run()
+
 
 if __name__ == "__main__":
     main()
