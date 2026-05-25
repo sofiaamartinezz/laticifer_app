@@ -3,11 +3,11 @@
 TransectController: manages editable transect lines in a napari viewer.
 
 Design:
-- generate(): computes centered positions and creates the Shapes layer.
-              Listens to layer.events.data to detect user deletions → pending flag.
-- recalculate(): reads whatever lines exist in the Shapes layer right now,
-                 adds intersection points below the shapes layer, re-selects shapes.
-- pending flag: True after generate or user edits, False after recalculate.
+- generate():     computes centered positions and creates the Shapes layer.
+                  Listens to layer.events.data to detect user deletions → pending flag.
+- recalculate():  reads whatever lines exist in the Shapes layer right now,
+                  adds intersection points below the shapes layer, re-selects shapes.
+- pending flag:   True after generate or user edits, False after recalculate.
 """
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ TRANSECT_LAYER_NAME = "Transect lines"
 POINTS_LAYER_NAME   = "Intersection points"
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 #  Position generation
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _TransectLine:
@@ -50,8 +50,8 @@ def _generate_lines(
     Formula: pos_i = (i + 0.5) * L / n
     Lines cover the full axis uniformly with no border margin.
     """
-    H, W = image_shape
-    n = max(1, int(num_lines))
+    H, W      = image_shape
+    n         = max(1, int(num_lines))
     direction = (direction or "both").lower().strip()
     lines: List[_TransectLine] = []
 
@@ -76,9 +76,9 @@ def _generate_lines(
     return [l.coords.copy() for l in lines]
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 #  Controller
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 class TransectController:
 
@@ -87,7 +87,7 @@ class TransectController:
         viewer: napari.Viewer,
         on_state_change: Optional[Callable[[], None]] = None,
     ):
-        self.viewer = viewer
+        self.viewer          = viewer
         self._on_state_change = on_state_change or (lambda: None)
         self.last_stats: Optional[dict] = None
         self._shapes_layer: Optional[Shapes] = None
@@ -97,7 +97,12 @@ class TransectController:
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(self, mask_shape: Tuple[int, int], num_lines: int, direction: str) -> None:
+    def generate(
+        self,
+        mask_shape: Tuple[int, int],
+        num_lines: int,
+        direction: str,
+    ) -> None:
         """
         Generate centered transect lines and render them in a new Shapes layer.
         Replaces any existing Transect lines and Intersection points layers.
@@ -108,11 +113,10 @@ class TransectController:
         napari_lines = _generate_lines(mask_shape, num_lines, direction)
         if not napari_lines:
             self._shapes_layer = None
-            self._pending = False
+            self._pending      = False
             self._on_state_change()
             return
 
-        # edge_width=8 makes lines easy to click and select
         self._shapes_layer = self.viewer.add_shapes(
             napari_lines,
             name=TRANSECT_LAYER_NAME,
@@ -127,10 +131,23 @@ class TransectController:
         self._pending = True
         self._on_state_change()
 
-    def recalculate(self, mask: np.ndarray, show_points: bool = True) -> Optional[dict]:
+    def recalculate(
+        self,
+        mask: np.ndarray,
+        show_points: bool = True,
+        um_per_px: Optional[float] = None,
+    ) -> Optional[dict]:
         """
         Recalculate density from whatever lines currently exist in the Shapes layer.
         Lines are NOT regenerated — user deletions are preserved.
+
+        Args:
+            mask:        Current binary label mask.
+            show_points: Add a napari Points layer with intersection markers.
+            um_per_px:   Optional scale factor forwarded to the analysis function.
+
+        Returns:
+            Stats dict (same keys as analyze_density_from_lines) or None on failure.
         """
         self._remove_layer(POINTS_LAYER_NAME)
 
@@ -139,12 +156,16 @@ class TransectController:
             return None
 
         h_lines, v_lines = self._classify_lines(lines)
-        stats, pts = analyze_density_from_lines(mask, h_lines, v_lines)
+        stats, pts       = analyze_density_from_lines(
+            mask, h_lines, v_lines, um_per_px=um_per_px
+        )
         self.last_stats = stats
 
         if show_points and pts.shape[0] > 0:
-            self.viewer.add_points(pts, name=POINTS_LAYER_NAME, size=6, face_color="yellow")
-            # Keep shapes on top and active so the user can keep editing
+            self.viewer.add_points(
+                pts, name=POINTS_LAYER_NAME, size=6, face_color="yellow"
+            )
+            # Keep shapes on top so the user can keep editing
             shapes = self._find_shapes_layer()
             if shapes is not None:
                 idx = self.viewer.layers.index(shapes)
