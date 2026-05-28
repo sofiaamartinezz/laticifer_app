@@ -42,7 +42,7 @@ class ScalebarHints:
     region : str
         Spatial region to search.  Limiting the region avoids false positives
         from tissue structure.
-        'bottom' | 'top' | 'left' | 'right' | 'any'
+        'bottom' | 'top' | 'any'
     search_fraction : float
         What fraction of the image to include in the search region.
         0.20 = bottom (or top / left / right) 20 % of the image.
@@ -129,12 +129,6 @@ def _crop_region(
     if region == "top":
         y1 = min(H, int(H * f))
         return gray[:y1, :],     0, 0
-    if region == "right":
-        x0 = max(0, int(W * (1.0 - f)))
-        return gray[:, x0:],     0, x0
-    if region == "left":
-        x1 = min(W, int(W * f))
-        return gray[:, :x1],     0, 0
     # 'any' – full image
     return gray, 0, 0
 

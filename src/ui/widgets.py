@@ -219,6 +219,7 @@ class PrepareTab(QWidget):
         color_row.addWidget(QLabel("Bar color:"))
         self._color_combo = QComboBox()
         self._color_combo.addItems(["auto", "white / bright", "black / dark"])
+        self._color_combo.setCurrentIndex(2)  # default: black / dark
         self._color_combo.setToolTip(
             "auto: tries white then black.\n"
             "white: bright bar on dark background (fluorescence).\n"
@@ -231,7 +232,7 @@ class PrepareTab(QWidget):
         region_row = QHBoxLayout()
         region_row.addWidget(QLabel("Bar location:"))
         self._region_combo = QComboBox()
-        self._region_combo.addItems(["bottom", "top", "left", "right", "anywhere"])
+        self._region_combo.addItems(["bottom", "top", "anywhere"])
         self._region_combo.setToolTip(
             "Which part of the image to search.\n"
             "Limiting the region avoids false positives in the tissue."
@@ -265,10 +266,12 @@ class PrepareTab(QWidget):
         self._bar_len_spin = QDoubleSpinBox()
         self._bar_len_spin.setRange(0.001, 999999.0)
         self._bar_len_spin.setDecimals(2)
-        self._bar_len_spin.setValue(100.0)
+        self._bar_len_spin.setValue(1.0)
         rw_row.addWidget(self._bar_len_spin)
+
         self._bar_unit_combo = QComboBox()
         self._bar_unit_combo.addItems(["µm", "nm", "mm"])
+        self._bar_unit_combo.setCurrentText("mm")
         rw_row.addWidget(self._bar_unit_combo)
         apply_auto_btn = QPushButton("Apply scale")
         apply_auto_btn.setStyleSheet(_ACCENT_BTN_STYLE)
@@ -278,8 +281,6 @@ class PrepareTab(QWidget):
         self._rw_widget.setLayout(rw_lay)
         self._rw_widget.setVisible(False)
         auto_lay.addWidget(self._rw_widget)
-
-        scale_lay.addWidget(auto_box)
 
         # ── Manual entry ──────────────────────────────────────────────────────
         manual_box, manual_lay = _group(
@@ -294,7 +295,7 @@ class PrepareTab(QWidget):
         self._scale_spin = QDoubleSpinBox()
         self._scale_spin.setRange(0.0, 9999.0)
         self._scale_spin.setDecimals(4)
-        self._scale_spin.setValue(0.0)
+        self._scale_spin.setValue(0.9302)
         self._scale_spin.setSpecialValueText("—")
         self._scale_spin.setToolTip("e.g. 0.65 means 1 px = 0.65 µm")
         self._unit_combo = QComboBox()
@@ -306,7 +307,24 @@ class PrepareTab(QWidget):
         man_row.addWidget(self._unit_combo)
         man_row.addWidget(apply_man_btn)
         manual_lay.addLayout(man_row)
+
         scale_lay.addWidget(manual_box)
+        scale_lay.addWidget(auto_box)
+
+        # Keep reset visually separated to avoid accidental clicks
+        scale_lay.addSpacing(14)
+
+        reset_scale_btn = QPushButton("↺  Reset scale / use pixels only")
+        reset_scale_btn.setToolTip("Remove the current scale and return to pixel-only measurements.")
+        reset_scale_btn.setStyleSheet(
+            "color:#d4a017;"
+            "border-color:#5a4610;"
+            "background:rgba(212,160,23,0.06);"
+        )
+        reset_scale_btn.clicked.connect(self._reset_scale)
+        scale_lay.addWidget(reset_scale_btn)
+
+        scale_lay.addSpacing(6)
 
         # Active scale confirmation label
         self._scale_active_lbl = QLabel("")
@@ -347,7 +365,7 @@ class PrepareTab(QWidget):
         color_map  = {0: "auto", 1: "white", 2: "black"}
         region_map = {
             "bottom": "bottom", "top": "top",
-            "left": "left", "right": "right", "anywhere": "any",
+            "anywhere": "any",
         }
         hints = ScalebarHints(
             color=color_map.get(self._color_combo.currentIndex(), "auto"),
@@ -363,8 +381,30 @@ class PrepareTab(QWidget):
         QApplication.processEvents()
 
         try:
-            img    = np.asarray(image_layer.data)
-            result, message = detect_scalebar(img, hints)
+            img = np.asarray(image_layer.data)
+            # Fast path: only search the selected region instead of the full image
+            H = img.shape[0]
+            region = self._region_combo.currentText()
+
+            y_offset = 0
+            img_search = img
+
+            if region == "bottom":
+                y_offset = int(H * 0.75)      # search only bottom 25%
+                img_search = img[y_offset:, ...]
+            elif region == "top":
+                y_offset = 0
+                img_search = img[:int(H * 0.25), ...]
+            else:
+                y_offset = 0
+                img_search = img
+
+            result, message = detect_scalebar(img_search, hints)
+
+            # If detection was done on a crop, shift coordinates back to full image
+            if result is not None and y_offset > 0:
+                result.y0 += y_offset
+                result.y1 += y_offset
         except Exception as exc:
             self._detect_status.setText(f"❌  Error during detection: {exc}")
             self._detect_status.setStyleSheet(_WARN_STYLE)
@@ -473,6 +513,20 @@ class PrepareTab(QWidget):
             return
         factor = val if "µm" in unit else val / 1000.0
         self._commit_scale(factor, f"1 px = {val} {unit}")
+
+    def _reset_scale(self) -> None:
+        self._ed.um_per_px = None
+        self._scale_spin.setValue(0.9302)
+        self._unit_combo.setCurrentText("µm/px")
+        self._scale_active_lbl.setText("")
+        self._scale_warn.setVisible(True)
+
+        self._detected_bar_px = None
+        self._detect_status.setVisible(False)
+        self._rw_widget.setVisible(False)
+
+        if "Detected scale bar" in self._ed.viewer.layers:
+            self._ed.viewer.layers.remove("Detected scale bar")
 
     # ── Shared ───────────────────────────────────────────────────────────────
 
@@ -636,7 +690,7 @@ class DensityTab(QWidget):
         area_row = QHBoxLayout()
         area_row.addWidget(QLabel("Reference area:"))
         self._area_combo = QComboBox()
-        self._area_combo.addItems(["Whole image", "Tissue area (auto)"])
+        self._area_combo.addItems(["Tissue area (auto)", "Whole image"])
         area_row.addWidget(self._area_combo)
         px_lay.addLayout(area_row)
 
@@ -664,6 +718,7 @@ class DensityTab(QWidget):
         dir_row.addWidget(QLabel("Direction:"))
         self._dir_combo = QComboBox()
         self._dir_combo.addItems(["both", "horizontal", "vertical"])
+        self._dir_combo.setCurrentText("horizontal")
         dir_row.addWidget(self._dir_combo)
         tr_lay.addLayout(dir_row)
 
@@ -997,6 +1052,7 @@ class NetworkTab(QWidget):
         BIF_NAME = "Bifurcation nodes"
         if BIF_NAME in viewer.layers:
             viewer.layers.remove(BIF_NAME)
+
         bif_pts = self._geom.bifurcation_points
         if bif_pts.shape[0] > 0:
             viewer.add_points(
@@ -1006,6 +1062,7 @@ class NetworkTab(QWidget):
                 face_color="#ff2d78",
                 border_color="#ffffff",
                 border_width=2,
+                border_width_is_relative=False,
                 opacity=0.95,
                 symbol="disc",
             )
@@ -1014,15 +1071,17 @@ class NetworkTab(QWidget):
         EP_NAME = "Laticifer endpoints"
         if EP_NAME in viewer.layers:
             viewer.layers.remove(EP_NAME)
+
         ep_pts = self._geom.endpoint_points
         if ep_pts.shape[0] > 0:
             viewer.add_points(
                 ep_pts,
                 name=EP_NAME,
                 size=14,
-                face_color="#00cfff",   # bright cyan — distinct from magenta
+                face_color="#00cfff",
                 border_color="#ffffff",
                 border_width=1,
+                border_width_is_relative=False,
                 opacity=0.85,
                 symbol="triangle_up",
             )
@@ -1107,7 +1166,7 @@ class InteractiveEditorWidget(QWidget):
         self.um_per_px: Optional[float] = None
 
         self.last_transect_num_lines: int = 10
-        self.last_transect_direction: str = "both"
+        self.last_transect_direction: str = "horizontal"
         self.last_transect_mean: Optional[float] = None
 
         self._transect_ctrl = TransectController(
