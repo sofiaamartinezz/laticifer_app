@@ -3,6 +3,7 @@ import pytest
 from skimage import io as skio
 
 import data.batch as batch
+from data.provenance import APP_VERSION
 
 
 def _fake_prediction(image, device=None):
@@ -31,6 +32,16 @@ def test_batch_uses_explicit_shared_scale(monkeypatch, tmp_path):
     row = results[0][3]
     assert float(row["um_per_px"]) == pytest.approx(0.5)
     assert row["scale_source"] == "batch_manual"
+    assert row["measurement_system"] == "physical"
+    assert row["length_unit"] == "µm"
+    assert row["area_unit"] == "µm²"
+    assert row["transect_num_lines_per_direction"] == 10
+    assert row["network_analysis_enabled"] is False
+    assert row["analysis_timestamp"]
+    assert row["app_version"]
+    assert row["app_version"] == APP_VERSION
+    assert row["source_image_path"].endswith("sample.tif")
+    assert row["saved_mask_path"].endswith("sample_mask.tif")
     assert (output_dir / "masks" / "sample_mask.tif").exists()
 
 
@@ -51,3 +62,6 @@ def test_batch_can_keep_results_in_pixels(monkeypatch, tmp_path):
 
     assert row["um_per_px"] == ""
     assert row["scale_source"] == "pixels_only"
+    assert row["measurement_system"] == "pixels_only"
+    assert row["length_unit"] == "px"
+    assert row["area_unit"] == "px²"

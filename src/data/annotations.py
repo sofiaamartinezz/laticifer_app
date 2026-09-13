@@ -15,7 +15,8 @@ from typing import Optional, Tuple
 import numpy as np
 from qtpy.QtWidgets import QFileDialog, QMessageBox
 
-from data.io import infer_dataset_root, save_image_and_mask
+from data.io import image_source_path, infer_dataset_root, save_image_and_mask
+from data.provenance import APP_VERSION, analysis_timestamp, measurement_units
 from utils.quantification import analyze_density_pixel_ratio, analyze_density_transect
 
 
@@ -71,18 +72,25 @@ def ensure_dataset_root(
 # -----------------------------------------------------------------------------
 
 _FIELDNAMES = [
-    "image_path",
-    "mask_path",
-    "timestamp",
+    "image_name",
+    "source_image_path",
+    "saved_image_path",
+    "saved_mask_path",
+    "analysis_timestamp",
+    "app_version",
     "initialized_from_model",
     "image_shape_y",
     "image_shape_x",
-    "laticifer_pixels",
-    "density_tissue",
-    "density",
+    "laticifer_area_px",
+    "laticifer_area_um2",
+    "density_fraction_tissue",
+    "density_fraction_whole_image",
     "transect_direction",
     "transect_num_lines",
     "transect_mean_intersections_per_line",
+    "measurement_system",
+    "length_unit",
+    "area_unit",
     "um_per_px",
     "scale_source",
     "scale_reference_pixels",
@@ -180,19 +188,29 @@ def save_annotation(
     def _fmt(v) -> str:
         return f"{float(v):.6f}" if np.isfinite(float(v)) else ""
 
+    measurement_system, length_unit, area_unit = measurement_units(um_per_px)
+    area_px = int(px_whole["laticifer_pixels"])
+
     row = {
-        "image_path":           str(image_out),
-        "mask_path":            str(mask_out),
-        "timestamp":            datetime.now().isoformat(),
+        "image_name":           str(image_layer.name or ""),
+        "source_image_path":    image_source_path(image_layer),
+        "saved_image_path":     str(image_out.resolve()),
+        "saved_mask_path":      str(mask_out.resolve()),
+        "analysis_timestamp":   analysis_timestamp(),
+        "app_version":          APP_VERSION,
         "initialized_from_model": "True" if initialized_from_model else "False",
         "image_shape_y":        int(image_data.shape[0]) if image_data.ndim >= 2 else "",
         "image_shape_x":        int(image_data.shape[1]) if image_data.ndim >= 2 else "",
-        "laticifer_pixels":     int(px_whole["laticifer_pixels"]),
-        "density_tissue":       _fmt(px_tissue["pixel_ratio"]),
-        "density":              _fmt(px_whole["pixel_ratio"]),
+        "laticifer_area_px":    area_px,
+        "laticifer_area_um2":  _fmt(area_px * um_per_px ** 2) if um_per_px else "",
+        "density_fraction_tissue": _fmt(px_tissue["pixel_ratio"]),
+        "density_fraction_whole_image": _fmt(px_whole["pixel_ratio"]),
         "transect_direction":   direction,
         "transect_num_lines":   num_lines,
         "transect_mean_intersections_per_line": _fmt(tr_mean),
+        "measurement_system": measurement_system,
+        "length_unit": length_unit,
+        "area_unit": area_unit,
         "um_per_px":            _fmt(um_per_px) if um_per_px else "",
         "scale_source":         scale_source if um_per_px else "pixels_only",
         "scale_reference_pixels": _fmt(scale_reference_pixels) if scale_reference_pixels else "",

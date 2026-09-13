@@ -109,6 +109,12 @@ def infer_mask_path(image_layer, dataset_root: Optional[Path]) -> Optional[Path]
     return None
 
 
+def image_source_path(image_layer) -> str:
+    """Return the original image path when napari exposes one."""
+    path = _source_path(image_layer)
+    return str(path.resolve()) if path is not None else ""
+
+
 def _source_path(layer) -> Optional[Path]:
     """Extract a filesystem path from a napari layer, if available."""
     src = getattr(layer, "source", None)

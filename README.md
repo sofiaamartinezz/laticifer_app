@@ -184,16 +184,10 @@ dataset_folder/
 └── annotations.csv        # Contains density and transect metrics for saved images
 ```
 
-`annotations.csv` contains one row per saved annotation, including:
-
-```text
-image_path, mask_path, timestamp, initialized_from_model,
-image_shape_y, image_shape_x, laticifer_pixels,
-density_tissue, density, transect_direction,
-transect_num_lines, transect_mean_intersections_per_line,
-um_per_px, scale_source, scale_reference_pixels,
-scale_reference_length_um
-```
+`annotations.csv` contains one row per saved annotation. It records the original
+and saved paths, analysis time, app version, image shape, calibration provenance,
+measurement units, density values, and transect parameters. This makes every
+export self-describing and traceable to its source image.
 
 Batch processing writes a separate output folder:
 
@@ -201,5 +195,5 @@ Batch processing writes a separate output folder:
 output_folder/
 ├── masks/
 │   └── sample_01_mask.tif
-└── batch_results.csv      # Density, transect, network, and scale metrics
+└── batch_results.csv      # Metrics, units, parameters, paths, and provenance
 ```

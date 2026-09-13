@@ -13,6 +13,7 @@ import pandas as pd
 from skimage import io as skio
 
 from model.predictor import predict_laticifer_mask
+from data.provenance import APP_VERSION, analysis_timestamp, measurement_units
 from utils.quantification import analyze_density_pixel_ratio, analyze_density_transect
 from utils.network_analysis import run_network_analysis
 
@@ -22,6 +23,17 @@ _IMAGE_EXTENSIONS = ["*.tif", "*.tiff", "*.jpg", "*.png"]
 # Column order for the output CSV
 _COLUMNS = [
     "filename",
+    "source_image_path",
+    "saved_mask_path",
+    "analysis_timestamp",
+    "app_version",
+    "image_shape_y",
+    "image_shape_x",
+    "transect_num_lines_per_direction",
+    "network_analysis_enabled",
+    "measurement_system",
+    "length_unit",
+    "area_unit",
     # density
     "density_percent_whole_image",
     "density_percent_tissue_mask",
@@ -97,6 +109,7 @@ def run_batch_processing(
         f for ext in _IMAGE_EXTENSIONS for f in in_path.glob(ext)
     )
     total = len(files)
+    run_timestamp = analysis_timestamp()
 
     # Convenience: convert a px value to µm, or return "" if scale unknown
     def _to_um(px_val, scale: Optional[float]) -> str:
@@ -112,13 +125,26 @@ def run_batch_processing(
     for i, f in enumerate(files, start=1):
         local_scale = um_per_px
         scale_source = "batch_manual" if um_per_px else "pixels_only"
+        measurement_system, length_unit, area_unit = measurement_units(local_scale)
+        mask_path = masks_out / f"{f.stem}_mask.tif"
         row: Dict = {
             "filename": f.name,
+            "source_image_path": str(f.resolve()),
+            "saved_mask_path": str(mask_path.resolve()),
+            "analysis_timestamp": run_timestamp,
+            "app_version": APP_VERSION,
+            "transect_num_lines_per_direction": max(1, int(num_lines)),
+            "network_analysis_enabled": bool(run_network),
+            "measurement_system": measurement_system,
+            "length_unit": length_unit,
+            "area_unit": area_unit,
             "um_per_px": _fmt(local_scale) if local_scale else "",
             "scale_source": scale_source,
         }
         try:
             img  = skio.imread(f)
+            row["image_shape_y"] = int(img.shape[0]) if img.ndim >= 2 else ""
+            row["image_shape_x"] = int(img.shape[1]) if img.ndim >= 2 else ""
             mask = predict_laticifer_mask(img)
 
             # --- Density ---
@@ -192,11 +218,19 @@ def run_batch_processing(
                     row[col] = ""
 
             # --- Save mask ---
-            skio.imsave(masks_out / f"{f.stem}_mask.tif", (mask * 255).astype(np.uint8))
+            skio.imsave(mask_path, (mask * 255).astype(np.uint8))
 
         except Exception as e:
             print(f"[ERROR] {f.name}: {e}")
-            row = _empty_row(f.name)
+            failed_row = _empty_row(f.name)
+            for key in (
+                "source_image_path", "saved_mask_path", "analysis_timestamp",
+                "app_version", "transect_num_lines_per_direction",
+                "network_analysis_enabled", "measurement_system",
+                "length_unit", "area_unit", "um_per_px", "scale_source",
+            ):
+                failed_row[key] = row.get(key, "")
+            row = failed_row
 
         yield i, total, f.name, row
 

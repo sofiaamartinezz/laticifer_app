@@ -11,7 +11,11 @@ def test_append_csv_migrates_old_schema(tmp_path):
         writer.writerow({"image_path": "old.tif", "density": "0.1"})
 
     new_row = {field: "" for field in _FIELDNAMES}
-    new_row.update({"image_path": "new.tif", "density": "0.2", "scale_source": "manual_entry"})
+    new_row.update({
+        "source_image_path": "new.tif",
+        "density_fraction_whole_image": "0.2",
+        "scale_source": "manual_entry",
+    })
     _append_csv(path, new_row)
 
     with path.open(newline="", encoding="utf-8") as file:
@@ -19,6 +23,6 @@ def test_append_csv_migrates_old_schema(tmp_path):
         rows = list(reader)
 
     assert reader.fieldnames == _FIELDNAMES
-    assert rows[0]["image_path"] == "old.tif"
+    assert rows[0]["source_image_path"] == ""
     assert rows[0]["scale_source"] == ""
     assert rows[1]["scale_source"] == "manual_entry"
