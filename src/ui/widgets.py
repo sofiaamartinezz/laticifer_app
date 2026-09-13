@@ -347,6 +347,14 @@ class PrepareTab(QWidget):
         self._rw_widget.setVisible(False)
         self._remove_scale_line_layer()
         self._ed._update_scale_indicators()
+    def clear_image(self) -> None:
+        """Restore the prepare tab to its no-image state."""
+        self._reset_scale()
+        self._img_lbl.setText("Open an image via File → Open or drag & drop")
+        self._img_lbl.setStyleSheet(_MUTED_STYLE)
+        self.enhance_btn.setEnabled(False)
+        self._measure_btn.setEnabled(False)
+
     # ── Interactive scale measurement ──────────────────────────────────────
 
     SCALE_LINE_LAYER = "Scale reference line"
@@ -820,6 +828,14 @@ class DensityTab(QWidget):
             self._tr_mean_val.setText("—")
             self._tr_std_val.setText("—")
 
+    def reset_results(self) -> None:
+        self._px_cov_val.setText("—")
+        self._px_area_val.setText("—")
+        self._tr_mean_val.setText("—")
+        self._tr_std_val.setText("—")
+        self._pending_lbl.setVisible(False)
+        self._recalc_btn.setEnabled(False)
+
     def _run_pixel_ratio(self) -> None:
         self._ed._run_pixel_ratio_from_tab()
 
@@ -994,6 +1010,26 @@ class NetworkTab(QWidget):
             self._scale_status.setText("No scale active · measurements use pixels")
             self._scale_status.setStyleSheet(_WARN_STYLE)
 
+    def reset_results(self) -> None:
+        """Clear cached geometry, metrics, and result actions."""
+        self._geom = None
+        self._stats = None
+        self._running_lbl.setVisible(False)
+        self.run_btn.setText("▶  Run skeleton analysis")
+        for label in (
+            self._skel_len_val, self._skel_um_val, self._bif_val,
+            self._ep_val, self._br_val, self._brlen_val, self._ang_val,
+            self._angstd_val, self._diam_val, self._dstd_val,
+            self._dmed_val, self._bnr_val,
+        ):
+            label.setText("—")
+        self._cc_lbl.setText("Connected components: —")
+        for button in (
+            self.show_bif_btn, self.show_diam_btn, self.hist_angle_btn,
+            self.hist_brlen_btn, self.hist_diam_btn,
+        ):
+            button.setEnabled(False)
+
     def _run_analysis(self) -> None:
         mask = self._ed._get_mask_data()
         if mask is None:
@@ -1003,10 +1039,11 @@ class NetworkTab(QWidget):
         self._running_lbl.setText("⏳  Skeletonizing and computing network metrics…")
         self._running_lbl.setVisible(True)
         um = self._ed.um_per_px
+        generation = self._ed._session_generation
 
         @thread_worker
         def _worker():
-            return run_network_analysis(mask, um_per_px=um)
+            return generation, run_network_analysis(mask, um_per_px=um)
 
         w = _worker()
         w.returned.connect(self._on_analysis_done)
@@ -1014,7 +1051,10 @@ class NetworkTab(QWidget):
         w.start()
 
     def _on_analysis_done(self, result) -> None:
-        stats, geom = result
+        generation, analysis_result = result
+        if generation != self._ed._session_generation:
+            return
+        stats, geom = analysis_result
         self._stats = stats
         self._geom  = geom
         self.run_btn.setEnabled(True)
@@ -1199,6 +1239,8 @@ class InteractiveEditorWidget(QWidget):
         self.scale_source: str = "pixels_only"
         self.scale_reference_pixels: Optional[float] = None
         self.scale_reference_length_um: Optional[float] = None
+        self._resetting_session = False
+        self._session_generation = 0
 
         self.last_transect_num_lines: int = 10
         self.last_transect_direction: str = "horizontal"
@@ -1269,11 +1311,60 @@ class InteractiveEditorWidget(QWidget):
 
     def _on_layer_removed(self, event) -> None:
         layer = event.value
+        if self._resetting_session:
+            return
+        if layer is self.base_image_layer:
+            self._reset_session()
+            return
         if layer is self.labels_layer:
             self.labels_layer = None
-        if layer is self.base_image_layer:
-            self.base_image_layer = None
+            self._clear_mask_results()
         self._update_all_states()
+
+    def _reset_session(self) -> None:
+        """Clear every layer and datum derived from the removed source image."""
+        self._resetting_session = True
+        self._session_generation += 1
+        try:
+            self.base_image_layer = None
+            self.labels_layer = None
+            for remaining_layer in list(self.viewer.layers):
+                self.viewer.layers.remove(remaining_layer)
+            self._transect_ctrl.reset()
+        finally:
+            self._resetting_session = False
+
+        self.dataset_root = None
+        self.initialized_from_model = False
+        self.um_per_px = None
+        self.scale_source = "pixels_only"
+        self.scale_reference_pixels = None
+        self.scale_reference_length_um = None
+        self.last_transect_num_lines = 10
+        self.last_transect_direction = "horizontal"
+        self.last_transect_mean = None
+        self.tab_prepare.clear_image()
+        self.tab_density.reset_results()
+        self.tab_network.reset_results()
+        self.tab_mask.set_ai_status("", False)
+        self._tabs.setCurrentIndex(0)
+        self._update_all_states()
+
+    def _clear_mask_results(self) -> None:
+        """Clear analyses that are invalid once the mask is removed."""
+        self._transect_ctrl.reset()
+        for name in (
+            "Computed Tissue Area", "Bifurcation nodes",
+            "Laticifer endpoints", "Diameter map",
+        ):
+            if name in self.viewer.layers:
+                self.viewer.layers.remove(name)
+        self.initialized_from_model = False
+        self.last_transect_num_lines = 10
+        self.last_transect_direction = "horizontal"
+        self.last_transect_mean = None
+        self.tab_density.reset_results()
+        self.tab_network.reset_results()
 
     def _update_all_states(self) -> None:
         has_image = self._get_image_layer() is not None
@@ -1333,6 +1424,7 @@ class InteractiveEditorWidget(QWidget):
             ) != QMessageBox.Yes:
                 return
         image_data = np.asarray(image_layer.data)
+        generation = self._session_generation
         self.tab_mask.auto_btn.setEnabled(False)
         self.tab_mask.auto_btn.setText("Generating…")
         self.tab_mask.set_ai_status("⏳ Running AI model, please wait…", True)
@@ -1344,6 +1436,8 @@ class InteractiveEditorWidget(QWidget):
         w = _run()
 
         def _done(mask):
+            if generation != self._session_generation or self.base_image_layer is None:
+                return
             self._add_labels_layer(mask.astype(np.uint8), from_model=True)
             self.tab_mask.set_ai_status("✓ Mask generated successfully.", True)
             from qtpy.QtCore import QTimer

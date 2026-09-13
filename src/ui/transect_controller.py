@@ -186,6 +186,15 @@ class TransectController:
     def has_transects(self) -> bool:
         return len(self._read_lines_from_layer()) > 0
 
+    def reset(self) -> None:
+        """Forget all transect state after the source analysis is cleared."""
+        self._remove_layer(TRANSECT_LAYER_NAME)
+        self._remove_layer(POINTS_LAYER_NAME)
+        self._shapes_layer = None
+        self.last_stats = None
+        self._pending = False
+        self._on_state_change()
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
