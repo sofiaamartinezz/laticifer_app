@@ -197,3 +197,7 @@ output_folder/
 │   └── sample_01_mask.tif
 └── batch_results.csv      # Metrics, units, parameters, paths, and provenance
 ```
+
+Each batch row includes `analysis_status` and `error_reason`. Failed images do
+not stop the remaining batch, and cancellation preserves the rows completed up
+to that point.

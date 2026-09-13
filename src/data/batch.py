@@ -6,7 +6,7 @@ of images and writes a CSV summary. No Qt dependency.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,8 @@ _COLUMNS = [
     "measurement_system",
     "length_unit",
     "area_unit",
+    "analysis_status",
+    "error_reason",
     # density
     "density_percent_whole_image",
     "density_percent_tissue_mask",
@@ -84,6 +86,7 @@ def run_batch_processing(
     num_lines: int = 10,
     run_network: bool = True,
     um_per_px: Optional[float] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Iterator[Tuple[int, int, str, Dict]]:
     """
     Process every image in in_dir_str: predict mask, compute density and
@@ -99,6 +102,7 @@ def run_batch_processing(
         run_network: If True, also compute skeleton network metrics.
         um_per_px:   Optional scale factor. When provided, µm columns are
                      populated alongside the pixel columns.
+        should_cancel: Optional callback checked between images.
     """
     in_path   = Path(in_dir_str)
     out_path  = Path(out_dir_str)
@@ -123,6 +127,8 @@ def run_batch_processing(
         return ""
 
     for i, f in enumerate(files, start=1):
+        if should_cancel is not None and should_cancel():
+            break
         local_scale = um_per_px
         scale_source = "batch_manual" if um_per_px else "pixels_only"
         measurement_system, length_unit, area_unit = measurement_units(local_scale)
@@ -138,6 +144,8 @@ def run_batch_processing(
             "measurement_system": measurement_system,
             "length_unit": length_unit,
             "area_unit": area_unit,
+            "analysis_status": "success",
+            "error_reason": "",
             "um_per_px": _fmt(local_scale) if local_scale else "",
             "scale_source": scale_source,
         }
@@ -189,6 +197,8 @@ def run_batch_processing(
                     })
                 except Exception as net_exc:
                     print(f"[WARN] {f.name}: network analysis failed: {net_exc}")
+                    row["analysis_status"] = "partial"
+                    row["error_reason"] = f"Network analysis failed: {net_exc}"
                     for col in [
                         "skeleton_length_px", "skeleton_length_um",
                         "connected_components",
@@ -230,6 +240,8 @@ def run_batch_processing(
                 "length_unit", "area_unit", "um_per_px", "scale_source",
             ):
                 failed_row[key] = row.get(key, "")
+            failed_row["analysis_status"] = "failed"
+            failed_row["error_reason"] = str(e)
             row = failed_row
 
         yield i, total, f.name, row

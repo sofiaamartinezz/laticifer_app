@@ -35,6 +35,7 @@ from data.io import (
 )
 from data.annotations import ensure_dataset_root, save_annotation
 from data.batch import run_batch_processing, write_batch_csv
+from data.errors import user_error_message
 from utils.preprocessing import apply_clahe
 from utils.quantification import analyze_density_pixel_ratio
 from utils.postprocessing import (
@@ -1064,6 +1065,7 @@ class NetworkTab(QWidget):
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Running…")
         self._running_lbl.setText("⏳  Skeletonizing and computing network metrics…")
+        self._running_lbl.setStyleSheet(_MUTED_STYLE)
         self._running_lbl.setVisible(True)
         um = self._ed.um_per_px
         generation = self._ed._session_generation
@@ -1074,7 +1076,12 @@ class NetworkTab(QWidget):
 
         w = _worker()
         w.returned.connect(self._on_analysis_done)
-        w.errored.connect(self._on_analysis_error)
+
+        def _error(exc_info):
+            if generation == self._ed._session_generation:
+                self._on_analysis_error(exc_info)
+
+        w.errored.connect(_error)
         w.start()
 
     def _on_analysis_done(self, result) -> None:
@@ -1094,9 +1101,15 @@ class NetworkTab(QWidget):
     def _on_analysis_error(self, exc_info) -> None:
         self.run_btn.setEnabled(True)
         self.run_btn.setText("▶  Run skeleton analysis")
-        self._running_lbl.setVisible(False)
-        QMessageBox.critical(self._ed, "Analysis error",
-                             f"Failed to run network analysis:\n{exc_info[1]}")
+        message = user_error_message(exc_info)
+        self._running_lbl.setText(f"✗ Analysis failed: {message}")
+        self._running_lbl.setStyleSheet("color:#e57373;font-size:11px;")
+        self._running_lbl.setVisible(True)
+        QMessageBox.critical(
+            self._ed, "Analysis error",
+            f"Network analysis could not be completed.\n\n{message}\n\n"
+            "You can correct the mask or settings and try again."
+        )
 
     def _fmt_px_um(self, px_val: float, um_per_px: Optional[float], decimals: int = 1) -> str:
         if not math.isfinite(px_val):
@@ -1471,8 +1484,15 @@ class InteractiveEditorWidget(QWidget):
             QTimer.singleShot(4000, lambda: self.tab_mask.set_ai_status("", False))
 
         def _err(exc):
-            self.tab_mask.set_ai_status("", False)
-            QMessageBox.critical(self, "Prediction error", f"Failed: {exc[1]}")
+            if generation != self._session_generation:
+                return
+            message = user_error_message(exc)
+            self.tab_mask.set_ai_status(f"✗ Mask generation failed: {message}", True)
+            QMessageBox.critical(
+                self, "Prediction error",
+                f"The mask could not be generated.\n\n{message}\n\n"
+                "Check the model and image, then try again."
+            )
 
         def _fin():
             self.tab_mask.auto_btn.setText("🤖  Auto-detect with AI model")
@@ -1744,6 +1764,15 @@ class BatchProcessingWidget(QWidget):
         )
         self.run_btn.clicked.connect(self._start_batch)
         lay.addWidget(self.run_btn)
+
+        self.cancel_btn = QPushButton("Cancel after current image")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_batch)
+        lay.addWidget(self.cancel_btn)
+
+        self._batch_worker = None
+        self._batch_cancel_requested = False
+        self._batch_cancelled = False
  
         lay.addStretch()
         self.setLayout(lay)
@@ -1801,12 +1830,22 @@ class BatchProcessingWidget(QWidget):
         self.run_btn.setText("Processing…")
         self._batch_failed = False
         self._batch_error_count = 0
+        self._batch_cancel_requested = False
+        self._batch_cancelled = False
+        self.cancel_btn.setEnabled(True)
         um = self._um_per_px()
         w = self._run_batch_worker(in_d, out_d, um)
+        self._batch_worker = w
         w.yielded.connect(self._on_progress)
         w.errored.connect(self._on_batch_error)
         w.finished.connect(self._on_finished)
         w.start()
+
+    def _cancel_batch(self) -> None:
+        self._batch_cancel_requested = True
+        self._batch_cancelled = True
+        self.cancel_btn.setEnabled(False)
+        self.status_lbl.setText("Cancelling after the current image…")
 
     def _on_progress(self, data) -> None:
         curr, total, name, failed = data
@@ -1818,13 +1857,29 @@ class BatchProcessingWidget(QWidget):
 
     def _on_batch_error(self, exc) -> None:
         self._batch_failed = True
-        self.status_lbl.setText("Batch processing failed")
-        QMessageBox.critical(self, "Batch error", f"Processing failed: {exc[1]}")
+        message = user_error_message(exc)
+        self.status_lbl.setText(f"Batch processing failed: {message}")
+        QMessageBox.critical(
+            self, "Batch error",
+            f"Batch processing stopped unexpectedly.\n\n{message}"
+        )
  
     def _on_finished(self) -> None:
         self.run_btn.setEnabled(True)
         self.run_btn.setText("▶  Start batch processing")
+        self.cancel_btn.setEnabled(False)
+        self._batch_worker = None
         if self._batch_failed:
+            return
+        if self._batch_cancelled:
+            self.status_lbl.setText(
+                f"Cancelled · {self.progress_bar.value()} image(s) processed"
+            )
+            QMessageBox.information(
+                self, "Batch cancelled",
+                "Processing was cancelled. Results completed before cancellation "
+                "were saved to 'batch_results.csv'."
+            )
             return
         self.progress_bar.setValue(self.progress_bar.maximum())
         errors = self._batch_error_count
@@ -1855,8 +1910,9 @@ class BatchProcessingWidget(QWidget):
             out_dir_str,
             num_lines=10,
             um_per_px=um_per_px,
+            should_cancel=lambda: self._batch_cancel_requested,
         ):
-            failed = row.get("density_percent_whole_image", "") == ""
+            failed = row.get("analysis_status") != "success"
             yield (curr, total, name, failed)
             results.append(row)
         if not results:
