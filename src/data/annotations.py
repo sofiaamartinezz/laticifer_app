@@ -83,10 +83,26 @@ _FIELDNAMES = [
     "transect_direction",
     "transect_num_lines",
     "transect_mean_intersections_per_line",
+    "um_per_px",
+    "scale_source",
+    "scale_reference_pixels",
+    "scale_reference_length_um",
 ]
 
 
 def _append_csv(csv_path: Path, row: dict) -> None:
+    # Upgrade an existing CSV schema before appending wider calibration rows.
+    if csv_path.exists():
+        with csv_path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            old_fields = reader.fieldnames or []
+            old_rows = list(reader)
+        if old_fields != _FIELDNAMES:
+            with csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=_FIELDNAMES)
+                writer.writeheader()
+                for old_row in old_rows:
+                    writer.writerow({key: old_row.get(key, "") for key in _FIELDNAMES})
     write_header = not csv_path.exists()
     with csv_path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=_FIELDNAMES)
@@ -108,6 +124,10 @@ def save_annotation(
     transect_num_lines: int = 10,
     transect_direction: str = "both",
     transect_mean: Optional[float] = None,
+    um_per_px: Optional[float] = None,
+    scale_source: str = "pixels_only",
+    scale_reference_pixels: Optional[float] = None,
+    scale_reference_length_um: Optional[float] = None,
 ) -> Optional[Tuple[Path, Path]]:
     """
     Save image + mask to disk and append a row to annotations.csv.
@@ -173,6 +193,10 @@ def save_annotation(
         "transect_direction":   direction,
         "transect_num_lines":   num_lines,
         "transect_mean_intersections_per_line": _fmt(tr_mean),
+        "um_per_px":            _fmt(um_per_px) if um_per_px else "",
+        "scale_source":         scale_source if um_per_px else "pixels_only",
+        "scale_reference_pixels": _fmt(scale_reference_pixels) if scale_reference_pixels else "",
+        "scale_reference_length_um": _fmt(scale_reference_length_um) if scale_reference_length_um else "",
     }
 
     try:

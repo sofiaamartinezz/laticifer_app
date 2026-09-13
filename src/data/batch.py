@@ -53,6 +53,7 @@ _COLUMNS = [
     "branch_node_ratio",
     # scale used
     "um_per_px",
+    "scale_source",
 ]
 
 
@@ -98,18 +99,24 @@ def run_batch_processing(
     total = len(files)
 
     # Convenience: convert a px value to µm, or return "" if scale unknown
-    def _to_um(px_val) -> str:
-        if um_per_px and um_per_px > 0:
+    def _to_um(px_val, scale: Optional[float]) -> str:
+        if scale and scale > 0:
             try:
                 import math
                 v = float(px_val)
-                return f"{v * um_per_px:.6f}" if math.isfinite(v) else ""
+                return f"{v * scale:.6f}" if math.isfinite(v) else ""
             except (TypeError, ValueError):
                 return ""
         return ""
 
     for i, f in enumerate(files, start=1):
-        row: Dict = {"filename": f.name, "um_per_px": _fmt(um_per_px) if um_per_px else ""}
+        local_scale = um_per_px
+        scale_source = "batch_manual" if um_per_px else "pixels_only"
+        row: Dict = {
+            "filename": f.name,
+            "um_per_px": _fmt(local_scale) if local_scale else "",
+            "scale_source": scale_source,
+        }
         try:
             img  = skio.imread(f)
             mask = predict_laticifer_mask(img)
@@ -132,7 +139,7 @@ def run_batch_processing(
             # --- Network ---
             if run_network:
                 try:
-                    net_stats, _ = run_network_analysis(mask, um_per_px=um_per_px)
+                    net_stats, _ = run_network_analysis(mask, um_per_px=local_scale)
                     row.update({
                         "skeleton_length_px":         net_stats.total_skeleton_length_px,
                         "skeleton_length_um":         _fmt(net_stats.total_skeleton_length_um) if net_stats.total_skeleton_length_um is not None else "",
@@ -141,17 +148,17 @@ def run_batch_processing(
                         "endpoint_count":             net_stats.endpoint_count,
                         "branch_count":               net_stats.branch_count,
                         "mean_branch_length_px":      _fmt(net_stats.mean_branch_length_px),
-                        "mean_branch_length_um":      _to_um(net_stats.mean_branch_length_px),
+                        "mean_branch_length_um":      _to_um(net_stats.mean_branch_length_px, local_scale),
                         "std_branch_length_px":       _fmt(net_stats.std_branch_length_px),
-                        "std_branch_length_um":       _to_um(net_stats.std_branch_length_px),
+                        "std_branch_length_um":       _to_um(net_stats.std_branch_length_px, local_scale),
                         "mean_bifurcation_angle_deg": _fmt(net_stats.mean_bifurcation_angle_deg),
                         "std_bifurcation_angle_deg":  _fmt(net_stats.std_bifurcation_angle_deg),
                         "mean_diameter_px":           _fmt(net_stats.mean_diameter_px),
-                        "mean_diameter_um":           _to_um(net_stats.mean_diameter_px),
+                        "mean_diameter_um":           _to_um(net_stats.mean_diameter_px, local_scale),
                         "std_diameter_px":            _fmt(net_stats.std_diameter_px),
-                        "std_diameter_um":            _to_um(net_stats.std_diameter_px),
+                        "std_diameter_um":            _to_um(net_stats.std_diameter_px, local_scale),
                         "median_diameter_px":         _fmt(net_stats.median_diameter_px),
-                        "median_diameter_um":         _to_um(net_stats.median_diameter_px),
+                        "median_diameter_um":         _to_um(net_stats.median_diameter_px, local_scale),
                         "branch_node_ratio":          _fmt(net_stats.branch_node_ratio),
                     })
                 except Exception as net_exc:

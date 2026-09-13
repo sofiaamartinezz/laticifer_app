@@ -20,15 +20,18 @@ import numpy as np
 from napari.qt.threading import thread_worker
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
+    QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QProgressBar, QScrollArea, QSizePolicy,
+    QPushButton, QProgressBar, QRadioButton, QScrollArea, QSizePolicy,
     QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from utils.scalebar import detect_scalebar, ScalebarHints
 from model.predictor import predict_laticifer_mask
-from data.io import infer_mask_path, load_mask
+from data.io import (
+    calibration_from_reference,
+    infer_mask_path,
+    load_mask,
+)
 from data.annotations import ensure_dataset_root, save_annotation
 from data.batch import run_batch_processing, write_batch_csv
 from utils.preprocessing import apply_clahe
@@ -175,7 +178,8 @@ class PrepareTab(QWidget):
     def __init__(self, editor: "InteractiveEditorWidget") -> None:
         super().__init__()
         self._ed = editor
-        self._detected_bar_px: Optional[float] = None
+        self._measured_line_px: Optional[float] = None
+        self._scale_line_layer = None
 
         inner = QWidget()
         lay = QVBoxLayout()
@@ -206,81 +210,65 @@ class PrepareTab(QWidget):
         self._scale_warn.setWordWrap(True)
         scale_lay.addWidget(self._scale_warn)
 
-        # ── Auto-detect ───────────────────────────────────────────────────────
-        auto_box, auto_lay = _group(
-            "Auto-detect scale bar",
-            "Detects a scale bar baked into the image pixels.\n"
-            "Only works when the bar is part of the image data, not a\n"
-            "napari viewer overlay."
+        # ── Interactive manual measurement ──────────────────────────────────
+        measure_box, measure_lay = _group(
+            "Calibrate using a reference line",
+            "Draw a line over a feature of known length (e.g. a scale bar) "
+            "directly on the image, then tell the program how long that\n"
+            "distance really is."
         )
+        measure_lay.addWidget(_small_label(
+            "color:#aaa;font-size:11px;",
+            "1. Click 'Draw scale line'.\n"
+            "2. On the image, click at the start of the known distance, "
+            "drag to the end, then release the mouse button.\n"
+            "3. Enter the real-world length below and click Apply scale."
+        ))
 
-        # Color hint
-        color_row = QHBoxLayout()
-        color_row.addWidget(QLabel("Bar color:"))
-        self._color_combo = QComboBox()
-        self._color_combo.addItems(["auto", "white / bright", "black / dark"])
-        self._color_combo.setCurrentIndex(2)  # default: black / dark
-        self._color_combo.setToolTip(
-            "auto: tries white then black.\n"
-            "white: bright bar on dark background (fluorescence).\n"
-            "black: dark bar on bright background (brightfield)."
-        )
-        color_row.addWidget(self._color_combo)
-        auto_lay.addLayout(color_row)
+        # Draw button
+        self._measure_btn = QPushButton("📏  Draw scale line")
+        self._measure_btn.setEnabled(False)
+        self._measure_btn.clicked.connect(self._on_measure_clicked)
+        measure_lay.addWidget(self._measure_btn)
 
-        # Region hint
-        region_row = QHBoxLayout()
-        region_row.addWidget(QLabel("Bar location:"))
-        self._region_combo = QComboBox()
-        self._region_combo.addItems(["bottom", "top", "anywhere"])
-        self._region_combo.setToolTip(
-            "Which part of the image to search.\n"
-            "Limiting the region avoids false positives in the tissue."
-        )
-        region_row.addWidget(self._region_combo)
-        auto_lay.addLayout(region_row)
+        # Status label — shows drawing instructions or the measured length
+        self._measure_status = QLabel("")
+        self._measure_status.setStyleSheet("font-size:11px;")
+        self._measure_status.setWordWrap(True)
+        self._measure_status.setVisible(False)
+        measure_lay.addWidget(self._measure_status)
 
-        # Detect button
-        self._detect_btn = QPushButton("🔍  Detect scale bar")
-        self._detect_btn.setEnabled(False)
-        self._detect_btn.clicked.connect(self._on_detect)
-        auto_lay.addWidget(self._detect_btn)
-
-        # Status label — shows "Detecting…", success, or failure message
-        self._detect_status = QLabel("")
-        self._detect_status.setStyleSheet("font-size:11px;")
-        self._detect_status.setWordWrap(True)
-        self._detect_status.setVisible(False)
-        auto_lay.addWidget(self._detect_status)
-
-        # Real-world length row — revealed only after a successful detection
+        # Real-world length row — revealed only after a line has been drawn
         self._rw_widget = QWidget()
         rw_lay = QVBoxLayout()
         rw_lay.setContentsMargins(0, 4, 0, 0)
         rw_lay.setSpacing(4)
         rw_lay.addWidget(_small_label(
             "color:#aaa;font-size:11px;",
-            "Enter the real-world length printed next to the scale bar:"
+            "Real-world length of the line you just drew:"
         ))
         rw_row = QHBoxLayout()
         self._bar_len_spin = QDoubleSpinBox()
         self._bar_len_spin.setRange(0.001, 999999.0)
         self._bar_len_spin.setDecimals(2)
-        self._bar_len_spin.setValue(1.0)
+        self._bar_len_spin.setValue(100.0)
         rw_row.addWidget(self._bar_len_spin)
 
         self._bar_unit_combo = QComboBox()
         self._bar_unit_combo.addItems(["µm", "nm", "mm"])
-        self._bar_unit_combo.setCurrentText("mm")
+        self._bar_unit_combo.setCurrentText("µm")
         rw_row.addWidget(self._bar_unit_combo)
-        apply_auto_btn = QPushButton("Apply scale")
-        apply_auto_btn.setStyleSheet(_ACCENT_BTN_STYLE)
-        apply_auto_btn.clicked.connect(self._apply_from_detection)
-        rw_row.addWidget(apply_auto_btn)
+        self._apply_measure_btn = QPushButton("Apply reference scale")
+        self._apply_measure_btn.setStyleSheet(_ACCENT_BTN_STYLE)
+        self._apply_measure_btn.setEnabled(False)
+        self._apply_measure_btn.clicked.connect(self._apply_from_measurement)
+        rw_row.addWidget(self._apply_measure_btn)
         rw_lay.addLayout(rw_row)
         self._rw_widget.setLayout(rw_lay)
         self._rw_widget.setVisible(False)
-        auto_lay.addWidget(self._rw_widget)
+        measure_lay.addWidget(self._rw_widget)
+        self._bar_len_spin.valueChanged.connect(self._update_measurement_preview)
+        self._bar_unit_combo.currentIndexChanged.connect(self._update_measurement_preview)
 
         # ── Manual entry ──────────────────────────────────────────────────────
         manual_box, manual_lay = _group(
@@ -295,7 +283,7 @@ class PrepareTab(QWidget):
         self._scale_spin = QDoubleSpinBox()
         self._scale_spin.setRange(0.0, 9999.0)
         self._scale_spin.setDecimals(4)
-        self._scale_spin.setValue(0.9302)
+        self._scale_spin.setValue(0.0)
         self._scale_spin.setSpecialValueText("—")
         self._scale_spin.setToolTip("e.g. 0.65 means 1 px = 0.65 µm")
         self._unit_combo = QComboBox()
@@ -308,21 +296,22 @@ class PrepareTab(QWidget):
         man_row.addWidget(apply_man_btn)
         manual_lay.addLayout(man_row)
 
+        scale_lay.addWidget(measure_box)
         scale_lay.addWidget(manual_box)
-        scale_lay.addWidget(auto_box)
 
         # Keep reset visually separated to avoid accidental clicks
         scale_lay.addSpacing(14)
 
-        reset_scale_btn = QPushButton("↺  Reset scale / use pixels only")
-        reset_scale_btn.setToolTip("Remove the current scale and return to pixel-only measurements.")
-        reset_scale_btn.setStyleSheet(
+        self._reset_scale_btn = QPushButton("Remove scale · use pixels only")
+        self._reset_scale_btn.setToolTip("Remove the current scale and return to pixel-only measurements.")
+        self._reset_scale_btn.setStyleSheet(
             "color:#d4a017;"
             "border-color:#5a4610;"
             "background:rgba(212,160,23,0.06);"
         )
-        reset_scale_btn.clicked.connect(self._reset_scale)
-        scale_lay.addWidget(reset_scale_btn)
+        self._reset_scale_btn.clicked.connect(self._reset_scale)
+        self._reset_scale_btn.setVisible(False)
+        scale_lay.addWidget(self._reset_scale_btn)
 
         scale_lay.addSpacing(6)
 
@@ -345,160 +334,159 @@ class PrepareTab(QWidget):
     # ── Public ───────────────────────────────────────────────────────────────
 
     def set_image_info(self, name: str, shape: tuple) -> None:
+        # A calibration belongs to one source image and must never leak into
+        # the next image implicitly.
+        self._reset_scale()
         self._img_lbl.setText(f"{name}  ·  {shape[1]} × {shape[0]} px")
         self._img_lbl.setStyleSheet("color:#5ca;font-size:11px;")
         self.enhance_btn.setEnabled(True)
-        self._detect_btn.setEnabled(True)
-        # Clear any previous detection result when a new image is loaded
-        self._detected_bar_px = None
-        self._detect_status.setVisible(False)
+        self._measure_btn.setEnabled(True)
+        # Clear any previous measurement when a new image is loaded
+        self._measured_line_px = None
+        self._measure_status.setVisible(False)
         self._rw_widget.setVisible(False)
+        self._remove_scale_line_layer()
+        self._ed._update_scale_indicators()
+    # ── Interactive scale measurement ──────────────────────────────────────
 
-    # ── Auto-detect ───────────────────────────────────────────────────────────
+    SCALE_LINE_LAYER = "Scale reference line"
 
-    def _on_detect(self) -> None:
+    def _on_measure_clicked(self) -> None:
         image_layer = self._ed._get_image_layer()
         if image_layer is None:
+            QMessageBox.warning(self, "No image", "Load an image first.")
             return
 
-        # Map UI selections to ScalebarHints fields
-        color_map  = {0: "auto", 1: "white", 2: "black"}
-        region_map = {
-            "bottom": "bottom", "top": "top",
-            "anywhere": "any",
-        }
-        hints = ScalebarHints(
-            color=color_map.get(self._color_combo.currentIndex(), "auto"),
-            region=region_map.get(self._region_combo.currentText(), "bottom"),
-        )
-
-        # Show "Detecting…" immediately before the (potentially slow) detection
-        self._detect_status.setText("⏳  Detecting…")
-        self._detect_status.setStyleSheet("color:#aaa;font-size:11px;")
-        self._detect_status.setVisible(True)
-        self._detect_btn.setEnabled(False)
-        from qtpy.QtWidgets import QApplication
-        QApplication.processEvents()
-
-        try:
-            img = np.asarray(image_layer.data)
-            # Fast path: only search the selected region instead of the full image
-            H = img.shape[0]
-            region = self._region_combo.currentText()
-
-            y_offset = 0
-            img_search = img
-
-            if region == "bottom":
-                y_offset = int(H * 0.75)      # search only bottom 25%
-                img_search = img[y_offset:, ...]
-            elif region == "top":
-                y_offset = 0
-                img_search = img[:int(H * 0.25), ...]
-            else:
-                y_offset = 0
-                img_search = img
-
-            result, message = detect_scalebar(img_search, hints)
-
-            # If detection was done on a crop, shift coordinates back to full image
-            if result is not None and y_offset > 0:
-                result.y0 += y_offset
-                result.y1 += y_offset
-        except Exception as exc:
-            self._detect_status.setText(f"❌  Error during detection: {exc}")
-            self._detect_status.setStyleSheet(_WARN_STYLE)
-            self._rw_widget.setVisible(False)
-            return
-        finally:
-            self._detect_btn.setEnabled(True)
-
-        if result is None:
-            # Detection failed — show the detailed reason so the user knows
-            # exactly what to change (color, region, or switch to manual)
-            self._detect_status.setText(
-                f"❌  Not detected.\n\n{message}\n\n"
-                "Try changing the bar color or location hint, "
-                "or enter the pixel size manually below."
-            )
-            self._detect_status.setStyleSheet(_WARN_STYLE)
-            self._rw_widget.setVisible(False)
-            return
-
-        # ── Success ───────────────────────────────────────────────────────────
-        self._detected_bar_px = float(result.width_px)
-        self._detect_status.setText(
-            f"✓  {result.color.capitalize()} bar found: "
-            f"{result.width_px} px wide.\n"
-            "Enter its real-world length below and click Apply scale."
-        )
-        self._detect_status.setStyleSheet("color:#5ca;font-size:11px;")
-        self._rw_widget.setVisible(True)
-
-        # Draw a highlighting rectangle in the viewer so the user can confirm
-        # that the correct bar was detected
-        self._show_detection_layer(result, image_layer)
-
-    def _show_detection_layer(self, result, image_layer) -> None:
-        """Add a Shapes layer that outlines the detected scale bar."""
-        LAYER_NAME = "Detected scale bar"
         viewer = self._ed.viewer
+        self._remove_scale_line_layer()
+        self._measured_line_px = None
+        self._rw_widget.setVisible(False)
 
-        # Remove any previous detection layer
-        if LAYER_NAME in viewer.layers:
-            viewer.layers.remove(LAYER_NAME)
-
-        # Build a rectangle: [[y0,x0],[y0,x1],[y1,x1],[y1,x0]]
-        rect = np.array([
-            [result.y0, result.x0],
-            [result.y0, result.x1],
-            [result.y1, result.x1],
-            [result.y1, result.x0],
-        ], dtype=float)
-
-        # Also draw the centre-line of the bar as a line shape
-        y_mid = (result.y0 + result.y1) / 2.0
-        line  = np.array([
-            [y_mid, float(result.x0)],
-            [y_mid, float(result.x1)],
-        ], dtype=float)
-
-        shapes_data  = [rect, line]
-        shape_types  = ["rectangle", "line"]
-        edge_colors  = ["#ffdd00", "#ffdd00"]   # bright yellow — visible on any background
-        face_colors  = ["transparent", "transparent"]
-
-        layer = viewer.add_shapes(
-            shapes_data,
-            shape_type=shape_types,
-            name=LAYER_NAME,
-            edge_color=edge_colors,
-            face_color=face_colors,
-            edge_width=2,
-            opacity=0.9,
+        # A fresh, empty Shapes layer in "add line" mode: the user draws the
+        # reference distance directly on the image (click → drag → release).
+        self._scale_line_layer = viewer.add_shapes(
+            name=self.SCALE_LINE_LAYER,
+            edge_width=3,
+            edge_color="#ffdd00",
+            face_color="transparent",
         )
-        layer.editable = False
-        # Bring the image back to the front after adding the overlay
-        viewer.layers.selection.active = image_layer
+        self._scale_line_layer.mode = "add_line"
+        self._scale_line_layer.events.data.connect(self._on_scale_line_changed)
+        viewer.layers.selection.active = self._scale_line_layer
 
-    # ── Apply scale from detection ────────────────────────────────────────────
+        self._measure_status.setText(
+            "✏  Click at the start of the known distance, drag to the "
+            "end, then release the mouse button."
+        )
+        self._measure_status.setStyleSheet("color:#aaa;font-size:11px;")
+        self._measure_status.setVisible(True)
 
-    def _apply_from_detection(self) -> None:
-        if not self._detected_bar_px or self._detected_bar_px <= 0:
+    def _on_scale_line_changed(self, event=None) -> None:
+        """Fired by napari while the user draws the line.
+
+        napari emits an early 'adding' event on mouse-press (a near-zero
+        placeholder line) and a final 'added' event once the mouse is
+        released with the full line. Only the final event is used, so we
+        don't switch the layer mode away from drawing in the middle of
+        the user's drag gesture.
+        """
+        if event is not None and getattr(event, "action", None) not in (
+            None, "added", "changed"
+        ):
+            return
+
+        layer = self._scale_line_layer
+        if layer is None or len(layer.data) == 0:
+            return
+
+        # Use the most recently drawn line as the reference distance.
+        coords = np.asarray(layer.data[-1], dtype=float)
+        if coords.shape[0] < 2:
+            return
+
+        p0, p1 = coords[0], coords[-1]
+        px_len = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+        if px_len <= 0:
+            return
+
+        self._measured_line_px = px_len
+        self._measure_status.setStyleSheet("color:#5ca;font-size:11px;")
+        self._rw_widget.setVisible(True)
+        self._apply_measure_btn.setEnabled(True)
+        self._update_measurement_preview()
+
+        # Switch to "select" so further mouse clicks don't start new lines;
+        # the user can still nudge the endpoints if needed.
+        layer.mode = "select"
+
+    def _current_scale_line_length(self) -> Optional[float]:
+        layer = self._scale_line_layer
+        if layer is None or len(layer.data) == 0:
+            return None
+        coords = np.asarray(layer.data[-1], dtype=float)
+        if coords.ndim != 2 or coords.shape[0] < 2:
+            return None
+        p0, p1 = coords[0], coords[-1]
+        length = float(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+        return length if math.isfinite(length) and length > 0 else None
+
+    def _update_measurement_preview(self) -> None:
+        px_len = self._current_scale_line_length()
+        if px_len is None:
+            return
+        try:
+            calibration = calibration_from_reference(
+                px_len, self._bar_len_spin.value(), self._bar_unit_combo.currentText()
+            )
+        except ValueError:
+            self._apply_measure_btn.setEnabled(False)
+            return
+        self._measured_line_px = px_len
+        self._apply_measure_btn.setEnabled(True)
+        self._measure_status.setText(
+            f"Line: {px_len:.2f} px  ·  Reference: "
+            f"{self._bar_len_spin.value():g} {self._bar_unit_combo.currentText()}\n"
+            f"Calculated scale: 1 px = {calibration.um_per_px:.6g} µm\n"
+            "Adjust the endpoints or value if needed, then apply."
+        )
+
+    def _remove_scale_line_layer(self) -> None:
+        if self.SCALE_LINE_LAYER in self._ed.viewer.layers:
+            try:
+                self._ed.viewer.layers.remove(self.SCALE_LINE_LAYER)
+            except Exception:
+                pass
+        self._scale_line_layer = None
+
+    # ── Apply scale from measurement ────────────────────────────────────────
+
+    def _apply_from_measurement(self) -> None:
+        pixel_length = self._current_scale_line_length()
+        if pixel_length is None:
             QMessageBox.warning(
-                self, "No detection",
-                "Run the auto-detector first, or enter the pixel size manually."
+                self, "No line drawn",
+                "Draw a line over a known distance first, or enter the "
+                "pixel size manually below."
             )
             return
         real_len = self._bar_len_spin.value()
-        unit     = self._bar_unit_combo.currentText()
-        unit_to_um = {"µm": 1.0, "nm": 0.001, "mm": 1000.0}
-        real_len_um = real_len * unit_to_um.get(unit, 1.0)
-        um_per_px   = real_len_um / self._detected_bar_px
+        unit = self._bar_unit_combo.currentText()
+        try:
+            calibration = calibration_from_reference(pixel_length, real_len, unit)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid reference", str(exc))
+            return
+        real_len_um = calibration.um_per_px * pixel_length
         self._commit_scale(
-            um_per_px,
-            f"{real_len} {unit} bar ({self._detected_bar_px:.1f} px) "
-            f"→ {um_per_px:.4f} µm/px",
+            calibration.um_per_px,
+            f"{real_len:g} {unit} line ({pixel_length:.2f} px) "
+            f"→ {calibration.um_per_px:.6g} µm/px",
+            source="reference_line",
+            reference_pixels=pixel_length,
+            reference_length_um=real_len_um,
+        )
+        self._measure_status.setText(
+            f"✓ Reference scale applied: 1 px = {calibration.um_per_px:.6g} µm"
         )
 
     # ── Manual entry ─────────────────────────────────────────────────────────
@@ -507,33 +495,49 @@ class PrepareTab(QWidget):
         val  = self._scale_spin.value()
         unit = self._unit_combo.currentText()
         if val <= 0:
-            self._ed.um_per_px = None
-            self._scale_active_lbl.setText("")
-            self._scale_warn.setVisible(True)
+            self._reset_scale()
             return
         factor = val if "µm" in unit else val / 1000.0
-        self._commit_scale(factor, f"1 px = {val} {unit}")
+        self._commit_scale(factor, f"1 px = {val} {unit}", source="manual_entry")
 
     def _reset_scale(self) -> None:
         self._ed.um_per_px = None
-        self._scale_spin.setValue(0.9302)
+        self._ed.scale_source = "pixels_only"
+        self._ed.scale_reference_pixels = None
+        self._ed.scale_reference_length_um = None
+        self._scale_spin.setValue(0.0)
         self._unit_combo.setCurrentText("µm/px")
         self._scale_active_lbl.setText("")
         self._scale_warn.setVisible(True)
+        self._reset_scale_btn.setVisible(False)
 
-        self._detected_bar_px = None
-        self._detect_status.setVisible(False)
+        self._measured_line_px = None
+        self._apply_measure_btn.setEnabled(False)
+        self._measure_status.setVisible(False)
         self._rw_widget.setVisible(False)
+        self._remove_scale_line_layer()
 
-        if "Detected scale bar" in self._ed.viewer.layers:
-            self._ed.viewer.layers.remove("Detected scale bar")
+        self._ed._update_scale_indicators()
 
     # ── Shared ───────────────────────────────────────────────────────────────
 
-    def _commit_scale(self, um_per_px: float, description: str) -> None:
+    def _commit_scale(
+        self,
+        um_per_px: float,
+        description: str,
+        *,
+        source: str,
+        reference_pixels: Optional[float] = None,
+        reference_length_um: Optional[float] = None,
+    ) -> None:
         self._ed.um_per_px = um_per_px
+        self._ed.scale_source = source
+        self._ed.scale_reference_pixels = reference_pixels
+        self._ed.scale_reference_length_um = reference_length_um
         self._scale_active_lbl.setText(f"✓ Scale active — {description}")
         self._scale_warn.setVisible(False)
+        self._reset_scale_btn.setVisible(True)
+        self._ed._update_scale_indicators()
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +685,10 @@ class DensityTab(QWidget):
         lay.setAlignment(Qt.AlignTop)
         lay.setSpacing(2)
 
+        self._scale_status = QLabel()
+        self._scale_status.setWordWrap(True)
+        lay.addWidget(self._scale_status)
+
         # Pixel-ratio density
         px_box, px_lay = _group(
             "Pixel density",
@@ -782,6 +790,16 @@ class DensityTab(QWidget):
         self.gen_btn.setEnabled(has_mask)
         self.save_btn.setEnabled(has_mask and has_image)
 
+    def set_scale_status(self, um_per_px: Optional[float]) -> None:
+        if um_per_px and um_per_px > 0:
+            self._scale_status.setText(
+                f"✓ Active scale: 1 px = {um_per_px:.6g} µm"
+            )
+            self._scale_status.setStyleSheet("color:#5ca;font-size:11px;font-weight:bold;")
+        else:
+            self._scale_status.setText("No scale active · measurements use pixels")
+            self._scale_status.setStyleSheet(_WARN_STYLE)
+
     def refresh_transect_ui(self, pending: bool) -> None:
         self._pending_lbl.setVisible(pending)
         self._recalc_btn.setEnabled(pending)
@@ -827,6 +845,10 @@ class NetworkTab(QWidget):
         lay = QVBoxLayout()
         lay.setAlignment(Qt.AlignTop)
         lay.setSpacing(2)
+
+        self._scale_status = QLabel()
+        self._scale_status.setWordWrap(True)
+        lay.addWidget(self._scale_status)
 
         # Run button
         run_box, run_lay = _group(
@@ -961,6 +983,16 @@ class NetworkTab(QWidget):
 
     def update_states(self, has_mask: bool) -> None:
         self.run_btn.setEnabled(has_mask)
+
+    def set_scale_status(self, um_per_px: Optional[float]) -> None:
+        if um_per_px and um_per_px > 0:
+            self._scale_status.setText(
+                f"✓ Active scale: 1 px = {um_per_px:.6g} µm"
+            )
+            self._scale_status.setStyleSheet("color:#5ca;font-size:11px;font-weight:bold;")
+        else:
+            self._scale_status.setText("No scale active · measurements use pixels")
+            self._scale_status.setStyleSheet(_WARN_STYLE)
 
     def _run_analysis(self) -> None:
         mask = self._ed._get_mask_data()
@@ -1164,6 +1196,9 @@ class InteractiveEditorWidget(QWidget):
         self.initialized_from_model: bool = False
         self.base_image_layer: Optional[napari.layers.Image] = None
         self.um_per_px: Optional[float] = None
+        self.scale_source: str = "pixels_only"
+        self.scale_reference_pixels: Optional[float] = None
+        self.scale_reference_length_um: Optional[float] = None
 
         self.last_transect_num_lines: int = 10
         self.last_transect_direction: str = "horizontal"
@@ -1197,6 +1232,8 @@ class InteractiveEditorWidget(QWidget):
         self.tab_density = DensityTab(self)
         self.tab_network = NetworkTab(self)
 
+        self._update_scale_indicators()
+
         self._tabs.addTab(self.tab_prepare, "1 · Prepare")
         self._tabs.addTab(self.tab_mask,    "2 · Mask")
         self._tabs.addTab(self.tab_density, "3 · Density")
@@ -1205,6 +1242,11 @@ class InteractiveEditorWidget(QWidget):
         lay.addWidget(self._tabs)
         self.setLayout(lay)
         self.setStyleSheet(_PANEL_STYLE)
+
+    def _update_scale_indicators(self) -> None:
+        """Keep the active calibration visible beside measurement results."""
+        self.tab_density.set_scale_status(self.um_per_px)
+        self.tab_network.set_scale_status(self.um_per_px)
 
     # ------------------------------------------------------------------
     # Layer events
@@ -1221,7 +1263,7 @@ class InteractiveEditorWidget(QWidget):
         if isinstance(layer, napari.layers.Image) and self.base_image_layer is None:
             self.base_image_layer = layer
         self._update_all_states()
-        if isinstance(layer, napari.layers.Image):
+        if isinstance(layer, napari.layers.Image) and layer is self.base_image_layer:
             img = np.asarray(layer.data)
             self.tab_prepare.set_image_info(layer.name, img.shape[:2])
 
@@ -1472,6 +1514,10 @@ class InteractiveEditorWidget(QWidget):
             transect_num_lines=self.last_transect_num_lines,
             transect_direction=self.last_transect_direction,
             transect_mean=self.last_transect_mean,
+            um_per_px=self.um_per_px,
+            scale_source=self.scale_source,
+            scale_reference_pixels=self.scale_reference_pixels,
+            scale_reference_length_um=self.scale_reference_length_um,
         )
 
 
@@ -1517,9 +1563,21 @@ class BatchProcessingWidget(QWidget):
         )
         scale_lay.addWidget(_small_label(
             "color:#666;font-size:10px;",
-            "Check your microscope metadata or use the auto-detector in the\n"
-            "Interactive Editor tab to find the pixel size for your images."
+            "Enter one value only when every image uses the same acquisition "
+            "scale. Mixed-scale batches should be processed separately."
         ))
+
+        self._scale_mode_group = QButtonGroup(self)
+        self._shared_scale_radio = QRadioButton("Use the same scale for every image")
+        self._pixels_only_radio = QRadioButton("Keep results in pixels")
+        self._pixels_only_radio.setChecked(True)
+        for radio in (
+            self._shared_scale_radio,
+            self._pixels_only_radio,
+        ):
+            self._scale_mode_group.addButton(radio)
+            radio.toggled.connect(self._update_scale_mode)
+            scale_lay.addWidget(radio)
  
         scale_row = QHBoxLayout()
         scale_row.addWidget(QLabel("Pixel size:"))
@@ -1533,7 +1591,11 @@ class BatchProcessingWidget(QWidget):
         self._unit_combo = QComboBox()
         self._unit_combo.addItems(["µm/px", "nm/px"])
         scale_row.addWidget(self._unit_combo)
-        scale_lay.addLayout(scale_row)
+        self._shared_scale_widget = QWidget()
+        scale_row.setContentsMargins(18, 0, 0, 0)
+        self._shared_scale_widget.setLayout(scale_row)
+        self._shared_scale_widget.setEnabled(False)
+        scale_lay.addWidget(self._shared_scale_widget)
  
         self._scale_preview = QLabel("")
         self._scale_preview.setStyleSheet("color:#5ca;font-size:11px;")
@@ -1570,14 +1632,25 @@ class BatchProcessingWidget(QWidget):
  
     def _um_per_px(self) -> Optional[float]:
         """Return the scale in µm/px, or None if not set."""
+        if not self._shared_scale_radio.isChecked():
+            return None
         val = self._scale_spin.value()
         if val <= 0:
             return None
         if self._unit_combo.currentText() == "nm/px":
             return val / 1000.0
         return float(val)
+
+    def _update_scale_mode(self, checked: bool = True) -> None:
+        if not checked:
+            return
+        self._shared_scale_widget.setEnabled(self._shared_scale_radio.isChecked())
+        self._update_scale_preview()
  
     def _update_scale_preview(self) -> None:
+        if self._pixels_only_radio.isChecked():
+            self._scale_preview.setText("Physical-unit columns will be left empty.")
+            return
         um = self._um_per_px()
         if um and um > 0:
             self._scale_preview.setText(f"→ 1 px = {um:.4f} µm  ·  µm columns will be exported")
@@ -1600,6 +1673,9 @@ class BatchProcessingWidget(QWidget):
         if not in_d or not out_d:
             QMessageBox.warning(self, "Error", "Select both folders.")
             return
+        if not Path(in_d).is_dir():
+            QMessageBox.warning(self, "Invalid input", "The input folder does not exist.")
+            return
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Processing…")
         self._batch_failed = False
@@ -1610,7 +1686,7 @@ class BatchProcessingWidget(QWidget):
         w.errored.connect(self._on_batch_error)
         w.finished.connect(self._on_finished)
         w.start()
- 
+
     def _on_progress(self, data) -> None:
         curr, total, name, failed = data
         if failed:
@@ -1646,10 +1722,18 @@ class BatchProcessingWidget(QWidget):
         )
  
     @thread_worker
-    def _run_batch_worker(self, in_dir_str: str, out_dir_str: str, um_per_px: Optional[float]):
+    def _run_batch_worker(
+        self,
+        in_dir_str: str,
+        out_dir_str: str,
+        um_per_px: Optional[float],
+    ):
         results = []
         for curr, total, name, row in run_batch_processing(
-            in_dir_str, out_dir_str, num_lines=10, um_per_px=um_per_px
+            in_dir_str,
+            out_dir_str,
+            num_lines=10,
+            um_per_px=um_per_px,
         ):
             failed = row.get("density_percent_whole_image", "") == ""
             yield (curr, total, name, failed)

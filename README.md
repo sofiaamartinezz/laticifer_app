@@ -7,7 +7,7 @@ A desktop tool built on [napari](https://napari.org/) for segmenting, refining, 
 ### Interactive Editor
 - **AI-Assisted Segmentation:** Generate initial masks using a U-Net model (SE-ResNeXt50).
 - **Preprocessing:** Apply CLAHE contrast enhancement for better visibility.
-- **Scale Calibration:** Work in pixels or set a pixel size manually. The app can also detect a baked-in scale bar and convert measurements to real units.
+- **Scale Calibration:** Enter a known pixel size or calibrate manually from a reference distance drawn on the image.
 - **Mask Refinement:**
   - **Morphology:** Dilate and erode masks.
   - **Cleaning:** Remove small objects and fill small holes.
@@ -81,6 +81,21 @@ This method requires no prior installation of Python or other tools.
     python src/main.py
     ```
 
+### Running tests
+
+Install the development dependencies and run the test suite from the project root:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+To include a coverage report:
+
+```bash
+pytest --cov=src --cov-report=term-missing
+```
+
 ---
 
 ## Project Structure
@@ -108,8 +123,7 @@ laticifer_app/
 │       ├── network_analysis.py # Skeleton/network metrics
 │       ├── postprocessing.py   # Mask cleanup and morphology
 │       ├── preprocessing.py    # CLAHE and image normalization
-│       ├── quantification.py   # Density and transect math
-│       └── scalebar.py         # Scale-bar detection
+│       └── quantification.py   # Density and transect math
 ├── Start_App.bat               # Windows Launcher
 ├── environment.yml             # Conda environment spec
 ├── run_laticifer_app.sh        # Linux helper script
@@ -157,10 +171,6 @@ Contains the main GUI logic using `qtpy`.
 - Computes skeleton length, connected components, branch counts, bifurcation/end-point counts, branch lengths, bifurcation angles, thickness, and branch-node ratio.
 - Returns both scalar metrics and geometry arrays for napari visualization.
 
-### `src/utils/scalebar.py`
-- Detects bright or dark scale bars in common image regions.
-- Converts a detected bar length plus a user-supplied real-world length into pixel size.
-
 ## Dataset Output Format
 
 The application enforces a consistent structure for reproducibility when saving a new or refined mask:
@@ -180,7 +190,9 @@ dataset_folder/
 image_path, mask_path, timestamp, initialized_from_model,
 image_shape_y, image_shape_x, laticifer_pixels,
 density_tissue, density, transect_direction,
-transect_num_lines, transect_mean_intersections_per_line
+transect_num_lines, transect_mean_intersections_per_line,
+um_per_px, scale_source, scale_reference_pixels,
+scale_reference_length_um
 ```
 
 Batch processing writes a separate output folder:
