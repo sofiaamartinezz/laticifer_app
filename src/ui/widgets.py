@@ -18,6 +18,7 @@ from typing import Optional
 import napari
 import numpy as np
 from napari.qt.threading import thread_worker
+from skimage import io as skio
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
@@ -32,11 +33,13 @@ from data.io import (
     infer_mask_path,
     load_mask,
     suspicious_scale_message,
+    image_source_path,
 )
 from data.annotations import ensure_dataset_root, save_annotation
 from data.batch import run_batch_processing, write_batch_csv
 from data.errors import user_error_message
 from data.settings import AppSettings, SettingsStore
+from data.session import SessionData, SessionError, load_session, save_session
 from utils.preprocessing import apply_clahe
 from utils.quantification import analyze_density_pixel_ratio
 from utils.postprocessing import (
@@ -190,15 +193,34 @@ class PrepareTab(QWidget):
         lay.setSpacing(2)
 
         # ── Image ────────────────────────────────────────────────────────────
+        session_box, session_lay = _group(
+            "Session",
+            "Resume a saved analysis or preserve the current one for later."
+        )
+        session_row = QHBoxLayout()
+        self.open_session_btn = QPushButton("Open session…")
+        self.open_session_btn.clicked.connect(editor.open_session)
+        self.save_session_btn = QPushButton("Save session…")
+        self.save_session_btn.setEnabled(False)
+        self.save_session_btn.clicked.connect(editor.save_session)
+        session_row.addWidget(self.open_session_btn)
+        session_row.addWidget(self.save_session_btn)
+        session_lay.addLayout(session_row)
+        lay.addWidget(session_box)
+
         img_box, img_lay = _group("Image")
         self._img_lbl = QLabel("Open an image via File → Open or drag & drop")
         self._img_lbl.setStyleSheet(_MUTED_STYLE)
         self._img_lbl.setWordWrap(True)
         img_lay.addWidget(self._img_lbl)
-        self.enhance_btn = QPushButton("⚡  Enhance contrast (CLAHE)")
+        self.enhance_btn = QPushButton("⚡  Create contrast-enhanced copy")
+        self.enhance_btn.setToolTip(
+            "Create a new CLAHE-enhanced image layer without changing the original."
+        )
         self.enhance_btn.setEnabled(False)
         self.enhance_btn.clicked.connect(editor.enhance_current_image)
         img_lay.addWidget(self.enhance_btn)
+
         lay.addWidget(img_box)
 
         # ── Scale calibration ────────────────────────────────────────────────
@@ -343,6 +365,7 @@ class PrepareTab(QWidget):
         self._img_lbl.setText(f"{name}  ·  {shape[1]} × {shape[0]} px")
         self._img_lbl.setStyleSheet("color:#5ca;font-size:11px;")
         self.enhance_btn.setEnabled(True)
+        self.save_session_btn.setEnabled(True)
         self._measure_btn.setEnabled(True)
         # Clear any previous measurement when a new image is loaded
         self._measured_line_px = None
@@ -356,6 +379,7 @@ class PrepareTab(QWidget):
         self._img_lbl.setText("Open an image via File → Open or drag & drop")
         self._img_lbl.setStyleSheet(_MUTED_STYLE)
         self.enhance_btn.setEnabled(False)
+        self.save_session_btn.setEnabled(False)
         self._measure_btn.setEnabled(False)
 
     # ── Interactive scale measurement ──────────────────────────────────────
@@ -1460,6 +1484,114 @@ class InteractiveEditorWidget(QWidget):
             if isinstance(layer, napari.layers.Image):
                 return layer
         return None
+
+    # ------------------------------------------------------------------
+    # Session persistence
+    # ------------------------------------------------------------------
+
+    def save_session(self) -> None:
+        image_layer = self._get_image_layer()
+        if image_layer is None:
+            QMessageBox.warning(self, "No image", "Load an image before saving a session.")
+            return
+        source_path = image_source_path(image_layer)
+        if not source_path or not Path(source_path).is_file():
+            QMessageBox.warning(
+                self, "Image has no file path",
+                "Save the source image to disk before creating a resumable session."
+            )
+            return
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "Save analysis session", "analysis_session.json",
+            "LatexLens session (*.json)"
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.suffix.lower() != ".json":
+            path = path.with_suffix(".json")
+        session = SessionData(
+            image_path=source_path,
+            dataset_root=str(self.dataset_root or ""),
+            initialized_from_model=self.initialized_from_model,
+            um_per_px=self.um_per_px,
+            scale_source=self.scale_source,
+            scale_reference_pixels=self.scale_reference_pixels,
+            scale_reference_length_um=self.scale_reference_length_um,
+            transect_num_lines=self.last_transect_num_lines,
+            transect_direction=self.last_transect_direction,
+            transect_lines=self._transect_ctrl.export_lines(),
+            active_tab=self._tabs.currentIndex(),
+        )
+        try:
+            save_session(path, session, self._get_mask_data())
+        except (OSError, SessionError, ValueError) as exc:
+            QMessageBox.critical(self, "Session save error", user_error_message(exc))
+            return
+        QMessageBox.information(
+            self, "Session saved",
+            f"Session saved to:\n{path}\n\nKeep the JSON and its mask file together."
+        )
+
+    def open_session(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Open analysis session", "", "LatexLens session (*.json)"
+        )
+        if not path_str:
+            return
+        try:
+            session = load_session(Path(path_str))
+            image = skio.imread(session.image_path)
+            mask = (
+                load_mask(Path(session.mask_path), tuple(image.shape[:2]))
+                if session.mask_path else None
+            )
+            if session.mask_path and mask is None:
+                raise SessionError("The saved mask does not match the source image.")
+        except (OSError, SessionError, ValueError) as exc:
+            QMessageBox.critical(self, "Session open error", user_error_message(exc))
+            return
+
+        if len(self.viewer.layers) and QMessageBox.question(
+            self, "Replace current session?",
+            "Opening this session will clear the current image and analysis. Continue?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+        ) != QMessageBox.Yes:
+            return
+
+        self._reset_session()
+        image_path = Path(session.image_path)
+        image_layer = self.viewer.add_image(
+            image, name=image_path.stem, metadata={"source": str(image_path)}
+        )
+        self.base_image_layer = image_layer
+        if mask is not None:
+            self._add_labels_layer(mask, from_model=session.initialized_from_model)
+        self.dataset_root = Path(session.dataset_root) if session.dataset_root else None
+        self.last_transect_num_lines = session.transect_num_lines
+        self.last_transect_direction = session.transect_direction
+
+        if session.um_per_px is not None:
+            self.tab_prepare._commit_scale(
+                session.um_per_px,
+                f"1 px = {session.um_per_px:.6g} µm (restored session)",
+                source=session.scale_source,
+                reference_pixels=session.scale_reference_pixels,
+                reference_length_um=session.scale_reference_length_um,
+            )
+
+        if mask is not None and session.transect_lines:
+            self._transect_ctrl.restore_lines(session.transect_lines)
+            stats = self._transect_ctrl.recalculate(mask, show_points=True)
+            if stats:
+                mean = stats.get("mean_intersections_per_line", float("nan"))
+                std = stats.get("std_intersections_per_line", float("nan"))
+                self.last_transect_mean = mean if math.isfinite(mean) else None
+                self.tab_density.show_transect_results(mean, std)
+
+        self._tabs.setCurrentIndex(session.active_tab)
+        self._update_all_states()
+        QMessageBox.information(self, "Session opened", "Analysis session restored successfully.")
 
     # ------------------------------------------------------------------
     # Mask helpers (called from MaskTab)
