@@ -159,22 +159,24 @@ def _extract_branches(skel: np.ndarray, bif_yx: np.ndarray) -> List[np.ndarray]:
 
 def _branch_length(branch_yx: np.ndarray) -> float:
     """
-    Approximate branch length by a greedy nearest-neighbour walk and summing
-    Euclidean step distances between consecutive pixels.
+    Measure an 8-connected skeleton component from its graph edges.
+
+    Orthogonal edges contribute 1 pixel and diagonal edges sqrt(2). Each edge
+    is visited once, so coordinate ordering cannot introduce artificial jumps.
     """
     if len(branch_yx) < 2:
-        return float(len(branch_yx))
-    pts = branch_yx.copy()
-    ordered = [pts[0]]
-    remaining = list(range(1, len(pts)))
-    while remaining:
-        last = ordered[-1]
-        dists = np.linalg.norm(pts[remaining] - last, axis=1)
-        nearest = remaining[int(np.argmin(dists))]
-        ordered.append(pts[nearest])
-        remaining.remove(nearest)
-    ordered_arr = np.array(ordered)
-    return float(np.sum(np.linalg.norm(np.diff(ordered_arr, axis=0), axis=1)))
+        return 0.0
+    pixels = set(map(tuple, np.asarray(branch_yx, dtype=int).tolist()))
+    length = 0.0
+    # Only forward offsets are needed to count each undirected edge once.
+    for y, x in pixels:
+        for dy, dx, weight in (
+            (0, 1, 1.0), (1, 0, 1.0),
+            (1, 1, np.sqrt(2.0)), (1, -1, np.sqrt(2.0)),
+        ):
+            if (y + dy, x + dx) in pixels:
+                length += weight
+    return float(length)
 
 
 def _angle_at_node(
@@ -325,7 +327,8 @@ def run_network_analysis(
     geom.diameter_map = _diameter_map(mask, skel)
 
     # ── Expansion ────────────────────────────────────────────────────────────
-    stats.total_skeleton_length_px = float(np.count_nonzero(skel))
+    skeleton_yx = np.column_stack(np.where(skel))
+    stats.total_skeleton_length_px = _branch_length(skeleton_yx)
     if um_per_px is not None and um_per_px > 0:
         stats.total_skeleton_length_um = stats.total_skeleton_length_px * um_per_px
 

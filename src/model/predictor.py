@@ -5,6 +5,7 @@ Pure numpy/torch — no Qt, no napari.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +20,8 @@ from model.inference import predict_image as _predict_patches
 MODEL_PATH = Path(__file__).parent.parent / "models" / "best_model_soft_clDice.pth"
 
 
-def _load_model(device: torch.device) -> torch.nn.Module:
+@lru_cache(maxsize=2)
+def _load_model(device_name: str) -> torch.nn.Module:
     """
     Load U-Net (SE-ResNeXt50 encoder) from disk.
 
@@ -28,6 +30,7 @@ def _load_model(device: torch.device) -> torch.nn.Module:
     - plain state_dict
     - dict with 'state_dict' or 'model_state_dict'
     """
+    device = torch.device(device_name)
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
             f"Model not found at {MODEL_PATH}. "
@@ -82,7 +85,7 @@ def predict_laticifer_mask(image: np.ndarray, device: Optional[str] = None) -> n
 
     preprocessed = apply_clahe(img)   # → grayscale uint8 (H, W)
     pred_255 = _predict_patches(
-        model=_load_model(torch.device(device)),
+        model=_load_model(str(torch.device(device))),
         image_np=preprocessed,
         patch_size=512,
         stride=256,

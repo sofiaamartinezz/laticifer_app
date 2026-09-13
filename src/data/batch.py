@@ -13,7 +13,6 @@ import pandas as pd
 from skimage import io as skio
 
 from model.predictor import predict_laticifer_mask
-from utils.preprocessing import apply_clahe
 from utils.quantification import analyze_density_pixel_ratio, analyze_density_transect
 from utils.network_analysis import run_network_analysis
 
@@ -112,9 +111,8 @@ def run_batch_processing(
     for i, f in enumerate(files, start=1):
         row: Dict = {"filename": f.name, "um_per_px": _fmt(um_per_px) if um_per_px else ""}
         try:
-            img     = skio.imread(f)
-            img_enh = apply_clahe(img)
-            mask    = predict_laticifer_mask(img_enh)
+            img  = skio.imread(f)
+            mask = predict_laticifer_mask(img)
 
             # --- Density ---
             px_whole  = analyze_density_pixel_ratio(mask)

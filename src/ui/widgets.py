@@ -1602,23 +1602,44 @@ class BatchProcessingWidget(QWidget):
             return
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Processing…")
+        self._batch_failed = False
+        self._batch_error_count = 0
         um = self._um_per_px()
         w = self._run_batch_worker(in_d, out_d, um)
         w.yielded.connect(self._on_progress)
+        w.errored.connect(self._on_batch_error)
         w.finished.connect(self._on_finished)
         w.start()
  
     def _on_progress(self, data) -> None:
-        curr, total, name = data
+        curr, total, name, failed = data
+        if failed:
+            self._batch_error_count += 1
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(curr)
         self.status_lbl.setText(f"Processing: {name}")
+
+    def _on_batch_error(self, exc) -> None:
+        self._batch_failed = True
+        self.status_lbl.setText("Batch processing failed")
+        QMessageBox.critical(self, "Batch error", f"Processing failed: {exc[1]}")
  
     def _on_finished(self) -> None:
-        self.progress_bar.setValue(self.progress_bar.maximum())
-        self.status_lbl.setText("Complete!")
         self.run_btn.setEnabled(True)
         self.run_btn.setText("▶  Start batch processing")
+        if self._batch_failed:
+            return
+        self.progress_bar.setValue(self.progress_bar.maximum())
+        errors = self._batch_error_count
+        if errors:
+            self.status_lbl.setText(f"Complete with {errors} error(s)")
+            QMessageBox.warning(
+                self, "Completed with errors",
+                f"Processing completed, but {errors} image(s) failed.\n"
+                "See 'batch_results.csv' for the incomplete rows.",
+            )
+            return
+        self.status_lbl.setText("Complete!")
         QMessageBox.information(
             self, "Done",
             "Batch processing complete.\nSee 'batch_results.csv' in the output folder.",
@@ -1630,8 +1651,11 @@ class BatchProcessingWidget(QWidget):
         for curr, total, name, row in run_batch_processing(
             in_dir_str, out_dir_str, num_lines=10, um_per_px=um_per_px
         ):
-            yield (curr, total, name)
+            failed = row.get("density_percent_whole_image", "") == ""
+            yield (curr, total, name, failed)
             results.append(row)
+        if not results:
+            raise ValueError("No supported images were found in the input folder.")
         write_batch_csv(out_dir_str, results)
 
 

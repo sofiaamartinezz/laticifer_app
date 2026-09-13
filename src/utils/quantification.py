@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy import ndimage as ndi
+from skimage.draw import line as raster_line
 from skimage.morphology import convex_hull_image, disk, binary_dilation, binary_erosion
 from skimage.transform import rescale, resize
 
@@ -124,6 +125,15 @@ def analyze_density_pixel_ratio(
 #  Transect density — auto-generated lines
 # ---------------------------------------------------------------------------
 
+def _count_entries(values: np.ndarray) -> Tuple[int, np.ndarray]:
+    """Count foreground runs, including one that starts at the line boundary."""
+    values = np.asarray(values, dtype=bool).reshape(-1)
+    if values.size == 0:
+        return 0, np.zeros(0, dtype=int)
+    starts = np.flatnonzero(values & ~np.r_[False, values[:-1]])
+    return int(starts.size), starts
+
+
 def analyze_density_transect(
     mask: np.ndarray,
     num_lines: int = 10,
@@ -185,9 +195,9 @@ def analyze_density_transect(
             y   = int(y)
             y_g = float(y + y_off)
             lines.append(np.array([[y_g, float(x_off)], [y_g, float(W - 1 + x_off)]], dtype=float))
-            diffs = np.diff(mask_bin[y, :].astype(np.int8))
-            h_counts.append(int(np.count_nonzero(diffs == 1)))
-            for x in np.where(diffs == 1)[0] + 1:
+            count, starts = _count_entries(mask_bin[y, :])
+            h_counts.append(count)
+            for x in starts:
                 points.append((float(y + y_off), float(x + x_off)))
 
     if direction in ("vertical", "both"):
@@ -195,9 +205,9 @@ def analyze_density_transect(
             x   = int(x)
             x_g = float(x + x_off)
             lines.append(np.array([[float(y_off), x_g], [float(H - 1 + y_off), x_g]], dtype=float))
-            diffs = np.diff(mask_bin[:, x].astype(np.int8))
-            v_counts.append(int(np.count_nonzero(diffs == 1)))
-            for y in np.where(diffs == 1)[0] + 1:
+            count, starts = _count_entries(mask_bin[:, x])
+            v_counts.append(count)
+            for y in starts:
                 points.append((float(y + y_off), float(x + x_off)))
 
     all_counts = h_counts + v_counts
@@ -265,19 +275,29 @@ def analyze_density_from_lines(
     h_counts: List[int] = []
     v_counts: List[int] = []
 
+    def _analyze_line(coords: np.ndarray) -> Tuple[int, List[Tuple[float, float]]]:
+        """Rasterize and analyze exactly the user-visible line segment."""
+        arr = np.asarray(coords, dtype=float)
+        if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+            return 0, []
+        y0 = int(np.clip(round(float(arr[0, 0])), 0, H - 1))
+        x0 = int(np.clip(round(float(arr[0, 1])), 0, W - 1))
+        y1 = int(np.clip(round(float(arr[-1, 0])), 0, H - 1))
+        x1 = int(np.clip(round(float(arr[-1, 1])), 0, W - 1))
+        rr, cc = raster_line(y0, x0, y1, x1)
+        count, starts = _count_entries(mask_bin[rr, cc])
+        hits = [(float(rr[i]), float(cc[i])) for i in starts]
+        return count, hits
+
     for coords in horizontal_lines:
-        y     = int(np.clip(round(float(coords[0, 0])), 0, H - 1))
-        diffs = np.diff(mask_bin[y, :].astype(np.int8))
-        h_counts.append(int(np.count_nonzero(diffs == 1)))
-        for x in np.where(diffs == 1)[0] + 1:
-            points.append((float(y), float(x)))
+        count, hits = _analyze_line(coords)
+        h_counts.append(count)
+        points.extend(hits)
 
     for coords in vertical_lines:
-        x     = int(np.clip(round(float(coords[0, 1])), 0, W - 1))
-        diffs = np.diff(mask_bin[:, x].astype(np.int8))
-        v_counts.append(int(np.count_nonzero(diffs == 1)))
-        for y in np.where(diffs == 1)[0] + 1:
-            points.append((float(y), float(x)))
+        count, hits = _analyze_line(coords)
+        v_counts.append(count)
+        points.extend(hits)
 
     all_counts = h_counts + v_counts
     has_h, has_v = bool(h_counts), bool(v_counts)
