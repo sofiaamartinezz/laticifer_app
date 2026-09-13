@@ -1,11 +1,16 @@
 dataset/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.pip-tmp/
 run_laticifer_app.sh
 models/
 venv/
+.venv/
 env/
 *.lnk
 info/
 Library/
 src/dataset/
 src copy/
+/src_*/

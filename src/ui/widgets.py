@@ -31,6 +31,7 @@ from data.io import (
     calibration_from_reference,
     infer_mask_path,
     load_mask,
+    suspicious_scale_message,
 )
 from data.annotations import ensure_dataset_root, save_annotation
 from data.batch import run_batch_processing, write_batch_csv
@@ -448,14 +449,24 @@ class PrepareTab(QWidget):
             )
         except ValueError:
             self._apply_measure_btn.setEnabled(False)
+            self._measure_status.setStyleSheet(_WARN_STYLE)
+            self._measure_status.setText(
+                f"Line: {px_len:.2f} px\n"
+                "Draw a line at least 10 px long for a reliable calibration."
+            )
             return
         self._measured_line_px = px_len
         self._apply_measure_btn.setEnabled(True)
+        warning = suspicious_scale_message(calibration.um_per_px)
+        warning_text = f"\n⚠ {warning}" if warning else ""
+        self._measure_status.setStyleSheet(
+            _WARN_STYLE if warning else "color:#5ca;font-size:11px;"
+        )
         self._measure_status.setText(
             f"Line: {px_len:.2f} px  ·  Reference: "
             f"{self._bar_len_spin.value():g} {self._bar_unit_combo.currentText()}\n"
             f"Calculated scale: 1 px = {calibration.um_per_px:.6g} µm\n"
-            "Adjust the endpoints or value if needed, then apply."
+            f"Adjust the endpoints or value if needed, then apply.{warning_text}"
         )
 
     def _remove_scale_line_layer(self) -> None:
@@ -484,6 +495,8 @@ class PrepareTab(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid reference", str(exc))
             return
+        if not self._confirm_suspicious_scale(calibration.um_per_px):
+            return
         real_len_um = calibration.um_per_px * pixel_length
         self._commit_scale(
             calibration.um_per_px,
@@ -506,7 +519,21 @@ class PrepareTab(QWidget):
             self._reset_scale()
             return
         factor = val if "µm" in unit else val / 1000.0
+        if not self._confirm_suspicious_scale(factor):
+            return
         self._commit_scale(factor, f"1 px = {val} {unit}", source="manual_entry")
+
+    def _confirm_suspicious_scale(self, um_per_px: float) -> bool:
+        warning = suspicious_scale_message(um_per_px)
+        if warning is None:
+            return True
+        return QMessageBox.question(
+            self,
+            "Check unusual scale",
+            f"{warning}\n\nApply this scale anyway?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        ) == QMessageBox.Yes
 
     def _reset_scale(self) -> None:
         self._ed.um_per_px = None
