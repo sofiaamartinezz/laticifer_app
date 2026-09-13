@@ -21,7 +21,7 @@ from napari.qt.threading import thread_worker
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QProgressBar, QRadioButton, QScrollArea, QSizePolicy,
     QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -36,6 +36,7 @@ from data.io import (
 from data.annotations import ensure_dataset_root, save_annotation
 from data.batch import run_batch_processing, write_batch_csv
 from data.errors import user_error_message
+from data.settings import AppSettings, SettingsStore
 from utils.preprocessing import apply_clahe
 from utils.quantification import analyze_density_pixel_ratio
 from utils.postprocessing import (
@@ -446,19 +447,21 @@ class PrepareTab(QWidget):
             return
         try:
             calibration = calibration_from_reference(
-                px_len, self._bar_len_spin.value(), self._bar_unit_combo.currentText()
+                px_len, self._bar_len_spin.value(), self._bar_unit_combo.currentText(),
+                self._ed.settings.minimum_reference_line_px,
             )
         except ValueError:
             self._apply_measure_btn.setEnabled(False)
             self._measure_status.setStyleSheet(_WARN_STYLE)
             self._measure_status.setText(
                 f"Line: {px_len:.2f} px\n"
-                "Draw a line at least 10 px long for a reliable calibration."
+                f"Draw a line at least {self._ed.settings.minimum_reference_line_px:g} "
+                "px long for a reliable calibration."
             )
             return
         self._measured_line_px = px_len
         self._apply_measure_btn.setEnabled(True)
-        warning = suspicious_scale_message(calibration.um_per_px)
+        warning = self._scale_warning(calibration.um_per_px)
         warning_text = f"\n⚠ {warning}" if warning else ""
         self._measure_status.setStyleSheet(
             _WARN_STYLE if warning else "color:#5ca;font-size:11px;"
@@ -492,7 +495,10 @@ class PrepareTab(QWidget):
         real_len = self._bar_len_spin.value()
         unit = self._bar_unit_combo.currentText()
         try:
-            calibration = calibration_from_reference(pixel_length, real_len, unit)
+            calibration = calibration_from_reference(
+                pixel_length, real_len, unit,
+                self._ed.settings.minimum_reference_line_px,
+            )
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid reference", str(exc))
             return
@@ -525,7 +531,7 @@ class PrepareTab(QWidget):
         self._commit_scale(factor, f"1 px = {val} {unit}", source="manual_entry")
 
     def _confirm_suspicious_scale(self, um_per_px: float) -> bool:
-        warning = suspicious_scale_message(um_per_px)
+        warning = self._scale_warning(um_per_px)
         if warning is None:
             return True
         return QMessageBox.question(
@@ -535,6 +541,14 @@ class PrepareTab(QWidget):
             QMessageBox.Yes | QMessageBox.Cancel,
             QMessageBox.Cancel,
         ) == QMessageBox.Yes
+
+    def _scale_warning(self, um_per_px: float) -> Optional[str]:
+        settings = self._ed.settings
+        return suspicious_scale_message(
+            um_per_px,
+            settings.minimum_typical_um_per_px,
+            settings.maximum_typical_um_per_px,
+        )
 
     def _reset_scale(self) -> None:
         self._ed.um_per_px = None
@@ -674,6 +688,11 @@ class MaskTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(_scroll_wrap(inner))
         self.setLayout(outer)
+
+    def apply_settings(self, settings: AppSettings) -> None:
+        self.spin_min.setValue(settings.remove_small_min_size)
+        self.spin_hole.setValue(settings.fill_holes_area)
+        self.spin_radius.setValue(settings.morphology_radius)
 
     def update_states(self, has_image: bool, has_mask: bool) -> None:
         self.auto_btn.setEnabled(has_image)
@@ -820,6 +839,9 @@ class DensityTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(_scroll_wrap(inner))
         self.setLayout(outer)
+
+    def apply_settings(self, settings: AppSettings) -> None:
+        self._nlines_spin.setValue(settings.transect_num_lines)
 
     def update_states(self, has_mask: bool, has_image: bool) -> None:
         self.px_btn.setEnabled(has_mask)
@@ -1268,9 +1290,10 @@ class NetworkTab(QWidget):
 # ---------------------------------------------------------------------------
 
 class InteractiveEditorWidget(QWidget):
-    def __init__(self, viewer: napari.Viewer) -> None:
+    def __init__(self, viewer: napari.Viewer, settings: Optional[AppSettings] = None) -> None:
         super().__init__()
         self.viewer = viewer
+        self.settings = settings or AppSettings()
         self.labels_layer: Optional[napari.layers.Labels] = None
         self.dataset_root: Optional[Path] = None
         self.initialized_from_model: bool = False
@@ -1282,7 +1305,7 @@ class InteractiveEditorWidget(QWidget):
         self._resetting_session = False
         self._session_generation = 0
 
-        self.last_transect_num_lines: int = 10
+        self.last_transect_num_lines: int = self.settings.transect_num_lines
         self.last_transect_direction: str = "horizontal"
         self.last_transect_mean: Optional[float] = None
 
@@ -1295,6 +1318,7 @@ class InteractiveEditorWidget(QWidget):
         self.viewer.layers.events.removed.connect(self._on_layer_removed)
 
         self._build_ui()
+        self.apply_settings(self.settings)
 
     def _build_ui(self) -> None:
         lay = QVBoxLayout()
@@ -1329,6 +1353,11 @@ class InteractiveEditorWidget(QWidget):
         """Keep the active calibration visible beside measurement results."""
         self.tab_density.set_scale_status(self.um_per_px)
         self.tab_network.set_scale_status(self.um_per_px)
+
+    def apply_settings(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.tab_mask.apply_settings(settings)
+        self.tab_density.apply_settings(settings)
 
     # ------------------------------------------------------------------
     # Layer events
@@ -1380,7 +1409,7 @@ class InteractiveEditorWidget(QWidget):
         self.scale_source = "pixels_only"
         self.scale_reference_pixels = None
         self.scale_reference_length_um = None
-        self.last_transect_num_lines = 10
+        self.last_transect_num_lines = self.settings.transect_num_lines
         self.last_transect_direction = "horizontal"
         self.last_transect_mean = None
         self.tab_prepare.clear_image()
@@ -1400,7 +1429,7 @@ class InteractiveEditorWidget(QWidget):
             if name in self.viewer.layers:
                 self.viewer.layers.remove(name)
         self.initialized_from_model = False
-        self.last_transect_num_lines = 10
+        self.last_transect_num_lines = self.settings.transect_num_lines
         self.last_transect_direction = "horizontal"
         self.last_transect_mean = None
         self.tab_density.reset_results()
@@ -1545,7 +1574,11 @@ class InteractiveEditorWidget(QWidget):
         image_layer = self._get_image_layer()
         if image_layer is None:
             return
-        enhanced = apply_clahe(np.asarray(image_layer.data))
+        enhanced = apply_clahe(
+            np.asarray(image_layer.data),
+            clip_limit=self.settings.clahe_clip_limit,
+            tile_grid_size=self.settings.clahe_tile_size,
+        )
         layer = self.viewer.add_image(
             enhanced,
             name=f"{image_layer.name} [enhanced]",
@@ -1667,9 +1700,13 @@ class InteractiveEditorWidget(QWidget):
 # ---------------------------------------------------------------------------
 
 class BatchProcessingWidget(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, settings: Optional[AppSettings] = None) -> None:
         super().__init__()
+        self.settings = settings or AppSettings()
         self._build_ui()
+
+    def apply_settings(self, settings: AppSettings) -> None:
+        self.settings = settings
  
     def _build_ui(self) -> None:
         lay = QVBoxLayout()
@@ -1908,7 +1945,7 @@ class BatchProcessingWidget(QWidget):
         for curr, total, name, row in run_batch_processing(
             in_dir_str,
             out_dir_str,
-            num_lines=10,
+            num_lines=self.settings.transect_num_lines,
             um_per_px=um_per_px,
             should_cancel=lambda: self._batch_cancel_requested,
         ):
@@ -1921,17 +1958,143 @@ class BatchProcessingWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+#  Persistent settings
+# ---------------------------------------------------------------------------
+
+class SettingsTab(QWidget):
+    def __init__(self, store: SettingsStore, settings: AppSettings, on_apply) -> None:
+        super().__init__()
+        self._store = store
+        self._on_apply = on_apply
+
+        lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignTop)
+        title = QLabel("Application settings")
+        title.setStyleSheet("font-size:14px;font-weight:bold;")
+        lay.addWidget(title)
+        lay.addWidget(_small_label(
+            "color:#888;font-size:11px;",
+            "Saved for your user account and applied immediately."
+        ))
+
+        form = QFormLayout()
+        self.transect_lines = self._int_spin(1, 10_000)
+        self.remove_small = self._int_spin(1, 100_000)
+        self.fill_holes = self._int_spin(1, 1_000_000)
+        self.morph_radius = self._int_spin(1, 100)
+        self.clahe_clip = QDoubleSpinBox()
+        self.clahe_clip.setRange(0.1, 100.0)
+        self.clahe_clip.setDecimals(2)
+        self.clahe_tile = self._int_spin(1, 128)
+        self.minimum_line = QDoubleSpinBox()
+        self.minimum_line.setRange(1.0, 10_000.0)
+        self.minimum_line.setDecimals(1)
+        self.scale_min = QDoubleSpinBox()
+        self.scale_min.setRange(0.000001, 1_000_000.0)
+        self.scale_min.setDecimals(6)
+        self.scale_max = QDoubleSpinBox()
+        self.scale_max.setRange(0.000001, 1_000_000.0)
+        self.scale_max.setDecimals(6)
+
+        form.addRow("Default transect lines:", self.transect_lines)
+        form.addRow("Remove objects smaller than (px):", self.remove_small)
+        form.addRow("Fill holes smaller than (px²):", self.fill_holes)
+        form.addRow("Morphology radius (px):", self.morph_radius)
+        form.addRow("CLAHE clip limit:", self.clahe_clip)
+        form.addRow("CLAHE tile size:", self.clahe_tile)
+        form.addRow("Minimum reference line (px):", self.minimum_line)
+        form.addRow("Usual scale minimum (µm/px):", self.scale_min)
+        form.addRow("Usual scale maximum (µm/px):", self.scale_max)
+        lay.addLayout(form)
+
+        buttons = QHBoxLayout()
+        save_btn = QPushButton("Save settings")
+        save_btn.setStyleSheet(_ACCENT_BTN_STYLE)
+        save_btn.clicked.connect(self._save)
+        reset_btn = QPushButton("Restore defaults")
+        reset_btn.clicked.connect(self._restore_defaults)
+        buttons.addWidget(save_btn)
+        buttons.addWidget(reset_btn)
+        lay.addLayout(buttons)
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#5ca;font-size:11px;")
+        lay.addWidget(self.status)
+        self._load_controls(settings)
+
+    @staticmethod
+    def _int_spin(minimum: int, maximum: int) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(minimum, maximum)
+        return spin
+
+    def _settings_from_controls(self) -> AppSettings:
+        return AppSettings.from_mapping({
+            "transect_num_lines": self.transect_lines.value(),
+            "remove_small_min_size": self.remove_small.value(),
+            "fill_holes_area": self.fill_holes.value(),
+            "morphology_radius": self.morph_radius.value(),
+            "clahe_clip_limit": self.clahe_clip.value(),
+            "clahe_tile_size": self.clahe_tile.value(),
+            "minimum_reference_line_px": self.minimum_line.value(),
+            "minimum_typical_um_per_px": self.scale_min.value(),
+            "maximum_typical_um_per_px": self.scale_max.value(),
+        })
+
+    def _load_controls(self, settings: AppSettings) -> None:
+        self.transect_lines.setValue(settings.transect_num_lines)
+        self.remove_small.setValue(settings.remove_small_min_size)
+        self.fill_holes.setValue(settings.fill_holes_area)
+        self.morph_radius.setValue(settings.morphology_radius)
+        self.clahe_clip.setValue(settings.clahe_clip_limit)
+        self.clahe_tile.setValue(settings.clahe_tile_size)
+        self.minimum_line.setValue(settings.minimum_reference_line_px)
+        self.scale_min.setValue(settings.minimum_typical_um_per_px)
+        self.scale_max.setValue(settings.maximum_typical_um_per_px)
+
+    def _save(self) -> None:
+        if self.scale_min.value() >= self.scale_max.value():
+            QMessageBox.warning(
+                self, "Invalid scale range",
+                "The usual scale minimum must be smaller than the maximum."
+            )
+            return
+        settings = self._settings_from_controls()
+        self._store.save(settings)
+        self._on_apply(settings)
+        self.status.setText("✓ Settings saved and applied")
+
+    def _restore_defaults(self) -> None:
+        settings = self._store.reset()
+        self._load_controls(settings)
+        self._on_apply(settings)
+        self.status.setText("✓ Default settings restored")
+
+
+# ---------------------------------------------------------------------------
 #  Root widget
 # ---------------------------------------------------------------------------
 
 class LaticiferAnnotationWidget(QWidget):
     def __init__(self, viewer: napari.Viewer) -> None:
         super().__init__()
+        self._settings_store = SettingsStore()
+        self.settings = self._settings_store.load()
         lay = QVBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
-        tabs.addTab(InteractiveEditorWidget(viewer), "Interactive Editor")
-        tabs.addTab(BatchProcessingWidget(),          "Batch Processing")
+        self.editor = InteractiveEditorWidget(viewer, self.settings)
+        self.batch = BatchProcessingWidget(self.settings)
+        self.settings_tab = SettingsTab(
+            self._settings_store, self.settings, self._apply_settings
+        )
+        tabs.addTab(self.editor,       "Interactive Editor")
+        tabs.addTab(self.batch,        "Batch Processing")
+        tabs.addTab(self.settings_tab, "Settings")
         lay.addWidget(tabs)
         self.setLayout(lay)
+
+    def _apply_settings(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.editor.apply_settings(settings)
+        self.batch.apply_settings(settings)

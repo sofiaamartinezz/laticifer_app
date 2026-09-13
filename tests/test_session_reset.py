@@ -6,6 +6,7 @@ from ui.transect_controller import (
     TransectController,
 )
 from ui.widgets import InteractiveEditorWidget
+from data.settings import AppSettings
 
 
 class FakeLayers(list):
@@ -42,6 +43,7 @@ def test_removing_source_image_resets_complete_session():
     editor = SimpleNamespace(
         _resetting_session=False,
         _session_generation=4,
+        settings=AppSettings(),
         base_image_layer=image,
         labels_layer=mask,
         viewer=SimpleNamespace(layers=layers),

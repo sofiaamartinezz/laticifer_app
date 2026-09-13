@@ -2,7 +2,11 @@
 import numpy as np
 
 
-def apply_clahe(image: np.ndarray) -> np.ndarray:
+def apply_clahe(
+    image: np.ndarray,
+    clip_limit: float = 2.0,
+    tile_grid_size: int = 8,
+) -> np.ndarray:
     """
     Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
     to an image and return an enhanced grayscale uint8 image.
@@ -58,7 +62,12 @@ def apply_clahe(image: np.ndarray) -> np.ndarray:
                 img_gray = np.clip(scaled, 0, 255).astype(np.uint8)
 
     # Apply CLAHE on grayscale
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    if clip_limit <= 0 or tile_grid_size <= 0:
+        raise ValueError("CLAHE clip limit and tile size must be positive.")
+    tile_size = int(tile_grid_size)
+    clahe = cv2.createCLAHE(
+        clipLimit=float(clip_limit), tileGridSize=(tile_size, tile_size)
+    )
     enhanced = clahe.apply(img_gray)
 
     return enhanced

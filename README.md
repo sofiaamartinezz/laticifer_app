@@ -17,6 +17,7 @@ A desktop tool built on [napari](https://napari.org/) for segmenting, refining, 
   - **Transect Method:** Generate editable horizontal, vertical, or combined transects and count laticifer intersections.
   - **Network Analysis:** Skeleton-based expansion, branching, thickness, and connectivity metrics.
 - **Data Management:** Auto-saves images, masks, and a persistent `annotations.csv` log.
+- **Persistent Settings:** User defaults for transects, mask cleanup, CLAHE, and scale validation are saved in the platform-standard Qt settings location.
 
 ### Batch Processing
 - **Bulk Inference:** Process entire folders of images automatically in the background.

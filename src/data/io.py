@@ -32,15 +32,16 @@ def calibration_from_reference(
     pixel_length: float,
     real_length: float,
     unit: str,
+    minimum_pixel_length: float = MIN_REFERENCE_LINE_PX,
 ) -> ScaleCalibration:
     """Build a calibration from a user-drawn reference distance."""
     pixel_length = float(pixel_length)
     real_length = float(real_length)
     if not math.isfinite(pixel_length) or pixel_length <= 0:
         raise ValueError("The reference line must have a positive pixel length.")
-    if pixel_length < MIN_REFERENCE_LINE_PX:
+    if pixel_length < minimum_pixel_length:
         raise ValueError(
-            f"The reference line must be at least {MIN_REFERENCE_LINE_PX:g} pixels long. "
+            f"The reference line must be at least {minimum_pixel_length:g} pixels long. "
             "Draw a longer line for a more reliable calibration."
         )
     real_length_um = _to_micrometres(real_length, unit)
@@ -50,12 +51,16 @@ def calibration_from_reference(
     return ScaleCalibration(real_length_um / pixel_length, "reference_line", detail)
 
 
-def suspicious_scale_message(um_per_px: float) -> Optional[str]:
+def suspicious_scale_message(
+    um_per_px: float,
+    minimum_typical: float = MIN_TYPICAL_UM_PER_PX,
+    maximum_typical: float = MAX_TYPICAL_UM_PER_PX,
+) -> Optional[str]:
     """Explain unusually small or large scales that merit user confirmation."""
     value = float(um_per_px)
     if not math.isfinite(value) or value <= 0:
         return "The calculated pixel size is invalid."
-    if value < MIN_TYPICAL_UM_PER_PX or value > MAX_TYPICAL_UM_PER_PX:
+    if value < minimum_typical or value > maximum_typical:
         return (
             f"The resulting scale is 1 px = {value:.6g} µm, which is unusual. "
             "Check the entered value and unit before continuing."

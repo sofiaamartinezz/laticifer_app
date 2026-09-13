@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from utils.preprocessing import apply_clahe
 
@@ -30,3 +31,13 @@ def test_non_finite_float_image_is_handled():
 
     assert result.shape == image.shape
     assert result.dtype == np.uint8
+
+
+@pytest.mark.parametrize("clip_limit,tile_size", [(0, 8), (2, 0)])
+def test_clahe_rejects_invalid_settings(clip_limit, tile_size):
+    with pytest.raises(ValueError, match="must be positive"):
+        apply_clahe(
+            np.zeros((8, 8), dtype=np.uint8),
+            clip_limit=clip_limit,
+            tile_grid_size=tile_size,
+        )
