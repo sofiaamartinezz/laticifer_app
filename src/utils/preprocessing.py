@@ -2,7 +2,11 @@
 import numpy as np
 
 
-def apply_clahe(image: np.ndarray) -> np.ndarray:
+def apply_clahe(
+    image: np.ndarray,
+    clip_limit: float = 2.0,
+    tile_grid_size: int = 8,
+) -> np.ndarray:
     """
     Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
     to an image and return an enhanced grayscale uint8 image.
@@ -38,20 +42,32 @@ def apply_clahe(image: np.ndarray) -> np.ndarray:
         # Already single-channel 2D
         img_gray = img
 
-    # Ensure uint8 range 0–255
-    if img_gray.dtype in (np.float32, np.float64):
+    # Convert to uint8 without clipping high-bit-depth microscopy images.
+    # Using the observed finite range also handles 10/12-bit data stored in a
+    # uint16 container, where dividing by 65535 would waste most of the range.
+    if img_gray.dtype != np.uint8:
         g = img_gray.astype(np.float32)
-        # If values are small (0-1), scale them up
-        if g.max() <= 1.0:
-            g = g * 255.0
-        # Clip to safe bounds and cast
-        img_gray = np.clip(g, 0, 255).astype(np.uint8)
-    elif img_gray.dtype != np.uint8:
-        # Simple clip + cast for other integer types (e.g. uint16)
-        img_gray = np.clip(img_gray, 0, 255).astype(np.uint8)
+        finite = np.isfinite(g)
+        if not np.any(finite):
+            img_gray = np.zeros(g.shape, dtype=np.uint8)
+        else:
+            lo = float(np.min(g[finite]))
+            hi = float(np.max(g[finite]))
+            if hi <= lo:
+                fill = np.clip(lo, 0, 255)
+                img_gray = np.full(g.shape, fill, dtype=np.uint8)
+            else:
+                scaled = (g - lo) * (255.0 / (hi - lo))
+                scaled[~finite] = 0.0
+                img_gray = np.clip(scaled, 0, 255).astype(np.uint8)
 
     # Apply CLAHE on grayscale
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    if clip_limit <= 0 or tile_grid_size <= 0:
+        raise ValueError("CLAHE clip limit and tile size must be positive.")
+    tile_size = int(tile_grid_size)
+    clahe = cv2.createCLAHE(
+        clipLimit=float(clip_limit), tileGridSize=(tile_size, tile_size)
+    )
     enhanced = clahe.apply(img_gray)
 
     return enhanced

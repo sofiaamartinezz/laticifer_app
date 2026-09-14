@@ -6,3 +6,6 @@ pyside6
 torch
 torchvision
 opencv-python
+pandas
+scipy
+segmentation-models-pytorch

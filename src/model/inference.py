@@ -26,7 +26,13 @@ def predict_image(
     model.eval()
 
     image_tensor = torch.tensor(image_np, dtype=torch.float32)
+    if image_tensor.ndim != 2:
+        raise ValueError(f"Expected a 2D image, got shape {tuple(image_tensor.shape)}.")
+    if patch_size <= 0 or stride <= 0:
+        raise ValueError("patch_size and stride must be positive integers.")
     H, W = image_tensor.shape
+    if H == 0 or W == 0:
+        raise ValueError("Cannot run inference on an empty image.")
 
     def _padded_size(length: int) -> int:
         if length <= patch_size:
@@ -35,10 +41,14 @@ def predict_image(
 
     H_pad, W_pad = _padded_size(H), _padded_size(W)
 
+    pad_h, pad_w = H_pad - H, W_pad - W
+    # Reflection padding requires every padding amount to be smaller than the
+    # corresponding input dimension. Tiny crops therefore need replication.
+    pad_mode = "reflect" if pad_h < H and pad_w < W else "replicate"
     image_tensor = F.pad(
         image_tensor.unsqueeze(0).unsqueeze(0) / 255.0,
-        (0, W_pad - W, 0, H_pad - H),
-        mode="reflect",
+        (0, pad_w, 0, pad_h),
+        mode=pad_mode,
     ).to(device)  # (1, 1, H_pad, W_pad)
 
     output    = torch.zeros((1, 1, H_pad, W_pad), dtype=torch.float32, device=device)
@@ -59,4 +69,4 @@ def predict_image(
     output = output / count_map
 
     binary = (output[:, :, :H, :W] > threshold).float()
-    return (binary.squeeze().cpu().numpy() * 255).astype(np.uint8)
+    return (binary[0, 0].cpu().numpy() * 255).astype(np.uint8)

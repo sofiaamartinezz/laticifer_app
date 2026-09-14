@@ -5,11 +5,67 @@ No Qt dependency — pure pathlib / numpy / skimage.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
 from skimage import io as skio
+
+
+@dataclass(frozen=True)
+class ScaleCalibration:
+    """A scalar pixel-size calibration and its provenance."""
+
+    um_per_px: float
+    source: str
+    detail: str
+
+
+MIN_REFERENCE_LINE_PX = 10.0
+MIN_TYPICAL_UM_PER_PX = 0.001
+MAX_TYPICAL_UM_PER_PX = 100.0
+
+
+def calibration_from_reference(
+    pixel_length: float,
+    real_length: float,
+    unit: str,
+    minimum_pixel_length: float = MIN_REFERENCE_LINE_PX,
+) -> ScaleCalibration:
+    """Build a calibration from a user-drawn reference distance."""
+    pixel_length = float(pixel_length)
+    real_length = float(real_length)
+    if not math.isfinite(pixel_length) or pixel_length <= 0:
+        raise ValueError("The reference line must have a positive pixel length.")
+    if pixel_length < minimum_pixel_length:
+        raise ValueError(
+            f"The reference line must be at least {minimum_pixel_length:g} pixels long. "
+            "Draw a longer line for a more reliable calibration."
+        )
+    real_length_um = _to_micrometres(real_length, unit)
+    if real_length_um is None or not math.isfinite(real_length_um):
+        raise ValueError("The real-world reference length or unit is invalid.")
+    detail = f"real={real_length_um:.6g} µm, pixels={pixel_length:.6g}"
+    return ScaleCalibration(real_length_um / pixel_length, "reference_line", detail)
+
+
+def suspicious_scale_message(
+    um_per_px: float,
+    minimum_typical: float = MIN_TYPICAL_UM_PER_PX,
+    maximum_typical: float = MAX_TYPICAL_UM_PER_PX,
+) -> Optional[str]:
+    """Explain unusually small or large scales that merit user confirmation."""
+    value = float(um_per_px)
+    if not math.isfinite(value) or value <= 0:
+        return "The calculated pixel size is invalid."
+    if value < minimum_typical or value > maximum_typical:
+        return (
+            f"The resulting scale is 1 px = {value:.6g} µm, which is unusual. "
+            "Check the entered value and unit before continuing."
+        )
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -58,6 +114,12 @@ def infer_mask_path(image_layer, dataset_root: Optional[Path]) -> Optional[Path]
     return None
 
 
+def image_source_path(image_layer) -> str:
+    """Return the original image path when napari exposes one."""
+    path = _source_path(image_layer)
+    return str(path.resolve()) if path is not None else ""
+
+
 def _source_path(layer) -> Optional[Path]:
     """Extract a filesystem path from a napari layer, if available."""
     src = getattr(layer, "source", None)
@@ -74,6 +136,15 @@ def _source_path(layer) -> Optional[Path]:
                 except TypeError:
                     continue
     return None
+
+
+def _to_micrometres(value: float, unit: str) -> Optional[float]:
+    normalized = str(unit).strip().lower().replace("μ", "µ")
+    factor = {
+        "µm": 1.0, "um": 1.0, "micrometer": 1.0, "micrometre": 1.0,
+        "nm": 0.001, "mm": 1000.0, "cm": 10000.0, "m": 1_000_000.0,
+    }.get(normalized)
+    return value * factor if factor is not None and value > 0 else None
 
 
 # -----------------------------------------------------------------------------

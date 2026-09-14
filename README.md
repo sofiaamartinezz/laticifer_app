@@ -1,193 +1,241 @@
-# LatexLens - Laticifer Annotation App
+# LatexLens — Laticifer Annotation App
 
-A desktop tool built on [napari](https://napari.org/) for segmenting, refining, and quantifying laticifer structures in plant microscopy images. It supports interactive human-in-the-loop annotation, density analysis, skeleton/network measurements, and high-throughput batch processing.
+LatexLens is a desktop application built with [napari](https://napari.org/) for segmenting, editing, and quantifying laticifer networks in microscopy images. It supports an interactive human-in-the-loop workflow and folder-level batch processing.
 
-## Key Features
+## Main features
 
-### Interactive Editor
-- **AI-Assisted Segmentation:** Generate initial masks using a U-Net model (SE-ResNeXt50).
-- **Preprocessing:** Apply CLAHE contrast enhancement for better visibility.
-- **Scale Calibration:** Work in pixels or set a pixel size manually. The app can also detect a baked-in scale bar and convert measurements to real units.
-- **Mask Refinement:**
-  - **Morphology:** Dilate and erode masks.
-  - **Cleaning:** Remove small objects and fill small holes.
-  - **Manual Editing:** Load existing masks or draw/edit labels directly in napari.
-- **Advanced Quantification:**
-  - **Pixel Density:** Calculate density relative to the whole image or automatically estimated tissue area.
-  - **Transect Method:** Generate editable horizontal, vertical, or combined transects and count laticifer intersections.
-  - **Network Analysis:** Skeleton-based expansion, branching, thickness, and connectivity metrics.
-- **Data Management:** Auto-saves images, masks, and a persistent `annotations.csv` log.
+- AI-assisted segmentation with a U-Net using a SE-ResNeXt50 encoder.
+- Manual creation, loading, painting, and refinement of masks.
+- Non-destructive CLAHE enhancement: it creates a new image layer and keeps the original unchanged.
+- Scale calibration from a user-drawn reference line or a known pixel size.
+- Pixel-density, editable-transect, and skeleton/network measurements.
+- Physical measurements in µm and µm² when a scale is active; otherwise results remain explicitly in pixels.
+- Versioned analysis sessions that restore the image, editable mask, scale, transects, parameters, and workflow position.
+- Persistent user settings for transects, mask cleanup, CLAHE, and scale validation.
+- Background batch processing with progress, cancellation, per-image failure reporting, and CSV export.
 
-### Batch Processing
-- **Bulk Inference:** Process entire folders of images automatically in the background.
-- **CSV Reporting:** Generates `batch_results.csv` with density, transect, network, and optional real-unit metrics for every image.
+LatexLens does **not** infer scale automatically from image metadata. A scale only becomes active after the user applies a reference-line calibration or enters the pixel size directly.
 
----
+## Installation from source
 
-## Installation & Usage
+Python 3.10 is recommended.
 
-### Option A: For End-Users (Windows Only)
-This method requires no prior installation of Python or other tools.
+### Using `venv` and pip
 
-1. **Download:** Download the distribution ZIP file from the release page:
-   https://github.com/sofiaamartinezz/laticifer_app/releases/download/v1.0/LaticiferSegmentationApp.zip
-2. **Unzip and open:** Right-click the file and select **"Extract All..."**. Navigate into the extracted folder.
-3. **Run the app:** Double-click **`Start_App.bat`**.
+From the project root on Windows Command Prompt:
 
-*Note: The first run may take several minutes while `micromamba` creates the local environment. Later launches should be much faster.*
+```bat
+py -3.10 -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
+```
 
-### Option B: For Developers (Running from source)
+In PowerShell, activate with:
 
-1. **Clone the repository:**
-    ```bash
-    git clone https://github.com/sofiaamartinezz/laticifer_app.git
-    cd laticifer_app
-    ```
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
 
-2. **Create the environment:**
+If Python 3.10 is not installed, install it first or use an available compatible Python version.
 
-   Recommended, using the provided conda/micromamba environment:
-   ```bash
-   conda env create -f environment.yml
-   conda activate latiseg
-   ```
+### Using conda or micromamba
 
-   Or with `venv` and pip:
-    ```bash
-    python -m venv venv
+```bash
+conda env create -f environment.yml
+conda activate latiseg
+```
 
-    # Windows
-    venv\Scripts\activate
+### Model checkpoint
 
-    # Linux/macOS
-    source venv/bin/activate
-    ```
+The trained checkpoint is not stored in Git. Place it at:
 
-3. **Install dependencies when using pip:**
-    ```bash
-    pip install -r requirements.txt
-    pip install segmentation-models-pytorch pandas scipy
-    ```
+```text
+src/models/best_model_soft_clDice.pth
+```
 
-4. **Check the model file:**
+Without this file, manual mask editing and non-AI analyses remain available, but automatic mask generation will report that the model is missing.
 
-   The predictor expects the trained checkpoint at:
-   ```text
-   src/models/best_model_soft_clDice.pth
-   ```
+## Running the application
 
-5. **Run the application:**
-    ```bash
-    python src/main.py
-    ```
+```bat
+python src\main.py
+```
 
----
+A packaged Windows distribution can use `Start_App.bat`; it creates its local micromamba environment on the first run and then starts the application.
 
-## Project Structure
+## Interactive workflow
+
+Open an image using napari's **File → Open** command or drag it into the viewer. The **Interactive Editor** contains four workflow tabs.
+
+### 1 · Prepare
+
+The controls are separated by purpose:
+
+- **Session**
+  - **Open session…** restores a previously saved analysis.
+  - **Save session…** stores the current analysis for later.
+- **Image**
+  - Displays the active source image and its dimensions.
+  - **Create contrast-enhanced copy** adds a CLAHE-enhanced layer without changing the original.
+- **Scale calibration**
+  - Draw a line over a known distance, enter its real length and unit, review the calculated µm/px value, and apply it.
+  - Alternatively, enter a known pixel size directly.
+  - Use **Remove scale · use pixels only** to return to pixel measurements.
+
+Reference lines that are too short are rejected. Unusually small or large scales require confirmation. The active scale is also shown beside measurement results.
+
+### 2 · Mask
+
+- Generate an initial mask with the AI model.
+- Load an existing mask or create an empty one.
+- Paint and erase directly in napari.
+- Remove small objects, fill holes, erode, or dilate using the configured defaults.
+
+Deleting the source-image layer resets the complete analysis: mask, derived layers, calibration, transects, cached results, and interface state.
+
+### 3 · Density
+
+- Calculate laticifer pixel coverage against the whole image or estimated tissue area.
+- Generate horizontal, vertical, or combined transects.
+- Edit or delete transect lines and recalculate from their current geometry.
+- Save the image, mask, and measurements to the selected dataset folder.
+
+### 4 · Network
+
+Run skeleton analysis to calculate:
+
+- Total skeleton length and connected components.
+- Bifurcations, endpoints, branches, branch lengths, and bifurcation angles.
+- Mean, standard deviation, and median diameter.
+- Branch-to-node connectivity ratio.
+
+Derived points, maps, and histograms can be displayed from the result controls.
+
+## Saving and opening sessions
+
+Choose **Interactive Editor → 1 · Prepare → Save session…**. For a session named `sample.json`, LatexLens creates:
+
+```text
+sample.json
+sample_mask.tif    # created when the analysis has a mask
+```
+
+The JSON contains no image pixels. It stores a reference to the original image plus the calibration, mask reference, edited transects, parameters, and active workflow tab. Keep the JSON and mask sidecar together. The original image must remain accessible; paths inside the session are relative where possible to make moving the files easier.
+
+To resume work, start LatexLens, choose **Open session…**, and select the JSON file. The file is validated before the current analysis is replaced. Corrupt files, unsupported versions, missing images or masks, invalid scales, and invalid transect geometry are reported without clearing the current work.
+
+## Persistent settings
+
+The top-level **Settings** tab controls:
+
+- Default number of transect lines.
+- Minimum object size and maximum hole area.
+- Morphological-operation radius.
+- CLAHE clip limit and tile size.
+- Minimum reference-line length.
+- Lower and upper limits used to flag unusual scales.
+
+**Save settings** applies and persists the values immediately. **Restore defaults** removes the saved preferences and restores safe defaults. Settings are stored in the platform-standard Qt user-settings location, outside the repository.
+
+## Batch processing
+
+The **Batch Processing** tab processes supported images from an input folder and writes masks and `batch_results.csv` to an output folder.
+
+- Choose pixel-only results or enter one shared scale for all images.
+- Do not combine images with different acquisition scales in one shared-scale batch.
+- Processing runs in the background.
+- **Cancel after current image** lets the active image finish, saves completed rows, and prevents the next image from starting.
+- A failed image does not stop the remaining batch.
+- `analysis_status` is `success`, `partial`, or `failed`; `error_reason` explains incomplete results.
+
+## Exported data
+
+Saving an interactive annotation creates or updates:
+
+```text
+dataset/
+├── images/
+│   └── sample.tif
+├── masks/
+│   └── sample_mask.tif
+└── annotations.csv
+```
+
+`annotations.csv` records source and saved paths, timestamp with timezone, application version, image dimensions, mask origin, density, transect parameters, calibration provenance, and explicit measurement units. Existing CSV files are migrated to the current column schema before new rows are appended.
+
+Batch output uses:
+
+```text
+output/
+├── masks/
+│   └── sample_mask.tif
+└── batch_results.csv
+```
+
+The batch CSV includes provenance, parameters, units, scale, density, transect and network metrics, plus per-image status and errors.
+
+## Error handling
+
+Long-running mask generation, network analysis, and batch processing recover their controls after errors. User-facing dialogs explain the failure, stale worker results are ignored after a session reset, and batch failures are preserved in the CSV.
+
+## Running tests
+
+Install development dependencies and run from the project root:
+
+```bat
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
+With coverage:
+
+```bat
+python -m pytest --cov=src --cov-report=term-missing
+```
+
+## Project structure
 
 ```text
 laticifer_app/
 ├── resources/
-│   └── app_icon.ico            # Application icon
+│   └── app_icon.ico
 ├── src/
-│   ├── main.py                 # Entry point: launches napari
+│   ├── main.py
 │   ├── data/
-│   │   ├── annotations.py      # annotations.csv logging and dataset resolution
-│   │   ├── batch.py            # Folder-level batch processing and CSV export
-│   │   └── io.py               # Image/mask path inference, loading, saving
+│   │   ├── annotations.py       # Interactive CSV export
+│   │   ├── batch.py             # Batch processing and CSV export
+│   │   ├── errors.py            # User-facing error formatting
+│   │   ├── io.py                # Image/mask I/O and scale calibration
+│   │   ├── provenance.py        # Version, timestamp, and unit provenance
+│   │   ├── session.py           # Versioned analysis sessions
+│   │   └── settings.py          # Validated persistent settings
 │   ├── model/
-│   │   ├── inference.py        # Sliding-window patch inference
-│   │   └── predictor.py        # Model loading and mask prediction
+│   │   ├── inference.py         # Sliding-window inference
+│   │   └── predictor.py         # Model loading and prediction
 │   ├── models/
 │   │   └── best_model_soft_clDice.pth
 │   ├── ui/
-│   │   ├── dialogs.py          # Quantification settings dialogs
+│   │   ├── dialogs.py
 │   │   ├── transect_controller.py
-│   │   └── widgets.py          # Main napari dock widgets and tabs
+│   │   └── widgets.py
 │   └── utils/
-│       ├── network_analysis.py # Skeleton/network metrics
-│       ├── postprocessing.py   # Mask cleanup and morphology
-│       ├── preprocessing.py    # CLAHE and image normalization
-│       ├── quantification.py   # Density and transect math
-│       └── scalebar.py         # Scale-bar detection
-├── Start_App.bat               # Windows Launcher
-├── environment.yml             # Conda environment spec
-├── run_laticifer_app.sh        # Linux helper script
-└── requirements.txt            # Pip requirements
+│       ├── network_analysis.py
+│       ├── postprocessing.py
+│       ├── preprocessing.py
+│       └── quantification.py
+├── tests/
+├── environment.yml
+├── pytest.ini
+├── requirements.txt
+├── requirements-dev.txt
+└── Start_App.bat
 ```
 
-## Module Overview
+## Current limitations
 
-### `src/main.py`
-- Launches the napari viewer.
-- Sets the window title and icon when available.
-- Adds the `LaticiferAnnotationWidget` dock widget.
-
-### `src/ui/widgets.py`
-Contains the main GUI logic using `qtpy`.
-- **InteractiveEditorWidget:** Handles the single-image workflow through the Prepare, Mask, Density, and Network tabs.
-- **BatchProcessingWidget:** Handles folder-level processing with background threading.
-- **LaticiferAnnotationWidget:** Combines the interactive editor and batch processor in the main dock widget.
-
-### `src/model/predictor.py`
-- Loads the U-Net checkpoint from `src/models/best_model_soft_clDice.pth`.
-- Converts RGB or grayscale inputs to the format expected by the model.
-- Runs patch-based prediction through `src/model/inference.py`.
-
-### `src/data/annotations.py`
-- Resolves or asks for the dataset folder.
-- **`save_annotation`:** Saves the image, binary mask, and a row in `annotations.csv`.
-
-### `src/data/batch.py`
-- Runs prediction, density quantification, transect analysis, and optional network analysis over a folder.
-- Saves generated masks under the selected output folder.
-- Writes the final `batch_results.csv`.
-
-### `src/utils/postprocessing.py`
-- **`remove_small_objects`**: Removes small isolated mask components.
-- **`fill_small_holes`**: Fills small gaps inside laticifer regions.
-- **`dilate_mask` / `erode_mask`**: Standard morphological operations.
-
-### `src/utils/quantification.py`
-- **`analyze_density_pixel_ratio`**: Calculates density against the whole image or an estimated tissue mask.
-- **`analyze_density_transect`**: Generates transect lines and counts intersections with laticifers.
-- **`analyze_density_from_lines`**: Recomputes transect density from edited napari line geometry.
-
-### `src/utils/network_analysis.py`
-- Computes skeleton length, connected components, branch counts, bifurcation/end-point counts, branch lengths, bifurcation angles, thickness, and branch-node ratio.
-- Returns both scalar metrics and geometry arrays for napari visualization.
-
-### `src/utils/scalebar.py`
-- Detects bright or dark scale bars in common image regions.
-- Converts a detected bar length plus a user-supplied real-world length into pixel size.
-
-## Dataset Output Format
-
-The application enforces a consistent structure for reproducibility when saving a new or refined mask:
-
-```text
-dataset_folder/
-├── images/
-│   └── sample_01.tif
-├── masks/
-│   └── sample_01_mask.tif
-└── annotations.csv        # Contains density and transect metrics for saved images
-```
-
-`annotations.csv` contains one row per saved annotation, including:
-
-```text
-image_path, mask_path, timestamp, initialized_from_model,
-image_shape_y, image_shape_x, laticifer_pixels,
-density_tissue, density, transect_direction,
-transect_num_lines, transect_mean_intersections_per_line
-```
-
-Batch processing writes a separate output folder:
-
-```text
-output_folder/
-├── masks/
-│   └── sample_01_mask.tif
-└── batch_results.csv      # Density, transect, network, and scale metrics
-```
+- Session files reference the original image instead of embedding it.
+- Restored network metrics must be recalculated from the restored mask.
+- A batch-level scale applies equally to every image in that batch.
+- The trained model checkpoint must be distributed separately from the Git repository.

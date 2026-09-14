@@ -186,6 +186,38 @@ class TransectController:
     def has_transects(self) -> bool:
         return len(self._read_lines_from_layer()) > 0
 
+    def export_lines(self) -> List[List[List[float]]]:
+        """Return JSON-safe copies of the current edited transects."""
+        return [line.tolist() for line in self._read_lines_from_layer()]
+
+    def restore_lines(self, lines: List[List[List[float]]]) -> None:
+        """Restore previously edited transects without regenerating them."""
+        self.reset()
+        arrays = [np.asarray(line, dtype=float) for line in lines]
+        if not arrays:
+            return
+        self._shapes_layer = self.viewer.add_shapes(
+            arrays,
+            name=TRANSECT_LAYER_NAME,
+            shape_type="line",
+            edge_width=8,
+            edge_color="cyan",
+        )
+        self._shapes_layer.mode = "select"
+        self._shapes_layer.events.data.connect(self._on_shapes_data_changed)
+        self.viewer.layers.selection.active = self._shapes_layer
+        self._pending = True
+        self._on_state_change()
+
+    def reset(self) -> None:
+        """Forget all transect state after the source analysis is cleared."""
+        self._remove_layer(TRANSECT_LAYER_NAME)
+        self._remove_layer(POINTS_LAYER_NAME)
+        self._shapes_layer = None
+        self.last_stats = None
+        self._pending = False
+        self._on_state_change()
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
