@@ -41,7 +41,7 @@ from data.errors import user_error_message
 from data.settings import AppSettings, SettingsStore
 from data.session import SessionData, SessionError, load_session, save_session
 from utils.preprocessing import apply_clahe
-from utils.quantification import analyze_density_pixel_ratio
+from utils.quantification import analyze_density_pixel_ratio, uses_tissue_reference
 from utils.postprocessing import (
     remove_small_objects, dilate_mask, erode_mask,
     fill_small_holes,
@@ -1740,7 +1740,9 @@ class InteractiveEditorWidget(QWidget):
         if self.labels_layer is None:
             return
         mask = self._get_mask_data()
-        use_tissue = self.tab_density._area_combo.currentIndex() == 1
+        use_tissue = uses_tissue_reference(
+            self.tab_density._area_combo.currentText()
+        )
         stats = analyze_density_pixel_ratio(mask, use_tissue_mask=use_tissue)
 
         if use_tissue:
