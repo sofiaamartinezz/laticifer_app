@@ -5,6 +5,7 @@ of images and writes a CSV summary. No Qt dependency.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -18,7 +19,7 @@ from utils.quantification import analyze_density_pixel_ratio, analyze_density_tr
 from utils.network_analysis import run_network_analysis
 
 
-_IMAGE_EXTENSIONS = ["*.tif", "*.tiff", "*.jpg", "*.png"]
+_IMAGE_SUFFIXES = {".tif", ".tiff", ".jpg", ".jpeg", ".png"}
 
 # Column order for the output CSV
 _COLUMNS = [
@@ -79,6 +80,63 @@ def _empty_row(filename: str) -> Dict:
     return row
 
 
+def create_batch_run_directory(output_root_str: str) -> Path:
+    """Create and return a unique directory for one batch execution."""
+    output_root = Path(output_root_str)
+    output_root.mkdir(parents=True, exist_ok=True)
+    base_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_dir = output_root / base_name
+    suffix = 2
+    while run_dir.exists():
+        run_dir = output_root / f"{base_name}_{suffix}"
+        suffix += 1
+    run_dir.mkdir()
+    return run_dir
+
+
+def _mask_paths(files: List[Path], masks_out: Path) -> Dict[Path, Path]:
+    """Return deterministic, collision-free output paths for input images."""
+    paths: Dict[Path, Path] = {}
+    used_names = set()
+    for image_path in files:
+        extension = image_path.suffix.lstrip(".").lower() or "image"
+        base_name = f"{image_path.stem}_{extension}_mask"
+        candidate = f"{base_name}.tif"
+        suffix = 2
+        while candidate.casefold() in used_names:
+            candidate = f"{base_name}_{suffix}.tif"
+            suffix += 1
+        used_names.add(candidate.casefold())
+        paths[image_path] = masks_out / candidate
+    return paths
+
+
+def find_batch_images(input_dir_str: str) -> List[Path]:
+    """Return supported top-level images with case-insensitive extensions."""
+    input_dir = Path(input_dir_str)
+    if not input_dir.is_dir():
+        return []
+    return sorted(
+        (path for path in input_dir.iterdir()
+         if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES),
+        key=lambda path: path.name.casefold(),
+    )
+
+
+def validate_batch_image(image: np.ndarray) -> None:
+    """Reject arrays whose channels cannot be interpreted unambiguously."""
+    if image.ndim == 2:
+        return
+    if image.ndim == 3 and image.shape[-1] in (3, 4):
+        return
+    raise ValueError(
+        "Unsupported or ambiguous image dimensions "
+        f"{tuple(image.shape)}. Expected a 2D grayscale image or an RGB/RGBA "
+        "image with channels in the last dimension; Z-stacks and other "
+        "multidimensional images must be converted before batch processing."
+    )
+
+
 def run_batch_processing(
     in_dir_str: str,
     out_dir_str: str,
@@ -109,11 +167,10 @@ def run_batch_processing(
     masks_out = out_path / "masks"
     masks_out.mkdir(parents=True, exist_ok=True)
 
-    files: List[Path] = sorted(
-        f for ext in _IMAGE_EXTENSIONS for f in in_path.glob(ext)
-    )
+    files = find_batch_images(str(in_path))
     total = len(files)
     run_timestamp = analysis_timestamp()
+    mask_paths = _mask_paths(files, masks_out)
 
     # Convenience: convert a px value to µm, or return "" if scale unknown
     def _to_um(px_val, scale: Optional[float]) -> str:
@@ -132,11 +189,11 @@ def run_batch_processing(
         local_scale = um_per_px
         scale_source = "batch_manual" if um_per_px else "pixels_only"
         measurement_system, length_unit, area_unit = measurement_units(local_scale)
-        mask_path = masks_out / f"{f.stem}_mask.tif"
+        mask_path = mask_paths[f]
         row: Dict = {
             "filename": f.name,
             "source_image_path": str(f.resolve()),
-            "saved_mask_path": str(mask_path.resolve()),
+            "saved_mask_path": "",
             "analysis_timestamp": run_timestamp,
             "app_version": APP_VERSION,
             "transect_num_lines_per_direction": max(1, int(num_lines)),
@@ -151,6 +208,7 @@ def run_batch_processing(
         }
         try:
             img  = skio.imread(f)
+            validate_batch_image(img)
             row["image_shape_y"] = int(img.shape[0]) if img.ndim >= 2 else ""
             row["image_shape_x"] = int(img.shape[1]) if img.ndim >= 2 else ""
             mask = predict_laticifer_mask(img)
@@ -229,6 +287,7 @@ def run_batch_processing(
 
             # --- Save mask ---
             skio.imsave(mask_path, (mask * 255).astype(np.uint8))
+            row["saved_mask_path"] = str(mask_path.resolve())
 
         except Exception as e:
             print(f"[ERROR] {f.name}: {e}")
@@ -248,16 +307,19 @@ def run_batch_processing(
 
 
 def write_batch_csv(out_dir_str: str, results: List[Dict]) -> None:
-    """Write accumulated result rows to batch_results.csv."""
+    """Atomically write accumulated result rows to batch_results.csv."""
     if not results:
         return
     df = pd.DataFrame(results)
     # Reorder to canonical column order, keeping any extra columns at the end
     ordered = [c for c in _COLUMNS if c in df.columns]
     extra   = [c for c in df.columns if c not in _COLUMNS]
-    df[ordered + extra].to_csv(
-        Path(out_dir_str) / "batch_results.csv", index=False
-    )
+    out_path = Path(out_dir_str)
+    out_path.mkdir(parents=True, exist_ok=True)
+    final_path = out_path / "batch_results.csv"
+    temporary_path = out_path / "batch_results.tmp.csv"
+    df[ordered + extra].to_csv(temporary_path, index=False)
+    temporary_path.replace(final_path)
 
 
 def _fmt(v) -> str:

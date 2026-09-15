@@ -141,11 +141,16 @@ The top-level **Settings** tab controls:
 
 ## Batch processing
 
-The **Batch Processing** tab processes supported images from an input folder and writes masks and `batch_results.csv` to an output folder.
+The **Batch Processing** tab processes supported images from an input folder. Each execution creates a timestamped subfolder in the selected output folder, keeping previous runs separate.
 
-- Choose pixel-only results or enter one shared scale for all images.
+- Choose pixel-only results or enter one shared scale for all images. Density percentages and transect intersections do not require a physical scale; the scale converts network lengths and diameters to physical units.
 - Do not combine images with different acquisition scales in one shared-scale batch.
+- Network metrics can be disabled when only density and transect results are needed.
+- A confirmation summary shows the image count, scale, transects, network setting, and destination before processing starts.
+- Grayscale, RGB, and RGBA images are accepted; ambiguous multidimensional images such as Z-stacks are reported and skipped.
 - Processing runs in the background.
+- Results are checkpointed after every completed image, so an interrupted run keeps its completed CSV rows.
+- Mask filenames include the source extension to avoid collisions such as `sample.png` and `sample.tif`.
 - **Cancel after current image** lets the active image finish, saves completed rows, and prevents the next image from starting.
 - A failed image does not stop the remaining batch.
 - `analysis_status` is `success`, `partial`, or `failed`; `error_reason` explains incomplete results.
@@ -169,9 +174,10 @@ Batch output uses:
 
 ```text
 output/
-├── masks/
-│   └── sample_mask.tif
-└── batch_results.csv
+└── batch_YYYYMMDD_HHMMSS/
+    ├── masks/
+    │   └── sample_tif_mask.tif
+    └── batch_results.csv
 ```
 
 The batch CSV includes provenance, parameters, units, scale, density, transect and network metrics, plus per-image status and errors.
