@@ -21,7 +21,7 @@ from napari.qt.threading import thread_worker
 from skimage import io as skio
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame,
     QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QProgressBar, QRadioButton, QScrollArea, QSizePolicy,
     QSpinBox, QTabWidget, QVBoxLayout, QWidget,
@@ -36,12 +36,17 @@ from data.io import (
     image_source_path,
 )
 from data.annotations import ensure_dataset_root, save_annotation
-from data.batch import run_batch_processing, write_batch_csv
+from data.batch import (
+    create_batch_run_directory,
+    find_batch_images,
+    run_batch_processing,
+    write_batch_csv,
+)
 from data.errors import user_error_message
 from data.settings import AppSettings, SettingsStore
 from data.session import SessionData, SessionError, load_session, save_session
 from utils.preprocessing import apply_clahe
-from utils.quantification import analyze_density_pixel_ratio
+from utils.quantification import analyze_density_pixel_ratio, uses_tissue_reference
 from utils.postprocessing import (
     remove_small_objects, dilate_mask, erode_mask,
     fill_small_holes,
@@ -1740,7 +1745,9 @@ class InteractiveEditorWidget(QWidget):
         if self.labels_layer is None:
             return
         mask = self._get_mask_data()
-        use_tissue = self.tab_density._area_combo.currentIndex() == 1
+        use_tissue = uses_tissue_reference(
+            self.tab_density._area_combo.currentText()
+        )
         stats = analyze_density_pixel_ratio(mask, use_tissue_mask=use_tissue)
 
         if use_tissue:
@@ -1915,7 +1922,14 @@ class BatchProcessingWidget(QWidget):
         self._unit_combo.currentIndexChanged.connect(self._update_scale_preview)
  
         lay.addWidget(scale_box)
- 
+
+        self._network_checkbox = QCheckBox("Calculate network metrics")
+        self._network_checkbox.setChecked(True)
+        self._network_checkbox.setToolTip(
+            "Disable this when only density and transect measurements are needed."
+        )
+        lay.addWidget(self._network_checkbox)
+
         # Progress
         lay.addSpacing(4)
         self.status_lbl = QLabel("Ready")
@@ -1942,6 +1956,10 @@ class BatchProcessingWidget(QWidget):
         self._batch_worker = None
         self._batch_cancel_requested = False
         self._batch_cancelled = False
+        self._batch_run_dir: Optional[Path] = None
+        self._batch_success_count = 0
+        self._batch_partial_count = 0
+        self._batch_failed_count = 0
  
         lay.addStretch()
         self.setLayout(lay)
@@ -1987,23 +2005,92 @@ class BatchProcessingWidget(QWidget):
             self.output_dir_edit.setText(d)
  
     def _start_batch(self) -> None:
-        in_d  = self.input_dir_edit.text()
-        out_d = self.output_dir_edit.text()
+        in_d = self.input_dir_edit.text().strip()
+        out_d = self.output_dir_edit.text().strip()
         if not in_d or not out_d:
             QMessageBox.warning(self, "Error", "Select both folders.")
             return
         if not Path(in_d).is_dir():
             QMessageBox.warning(self, "Invalid input", "The input folder does not exist.")
             return
+        files = find_batch_images(in_d)
+        if not files:
+            QMessageBox.warning(
+                self, "No images", "No supported images were found in the input folder."
+            )
+            return
+        um = self._um_per_px()
+        if self._shared_scale_radio.isChecked() and um is None:
+            proceed = QMessageBox.question(
+                self,
+                "No physical scale",
+                "No valid pixel size has been entered. Density percentages and "
+                "transect intersections do not require a physical scale, and "
+                "network lengths and diameters can still be exported in pixels.\n\n"
+                "Continue with pixel-only results?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Yes,
+            )
+            if proceed != QMessageBox.Yes:
+                return
+            self._pixels_only_radio.setChecked(True)
+            um = None
+        if um is not None:
+            warning = suspicious_scale_message(
+                um,
+                self.settings.minimum_typical_um_per_px,
+                self.settings.maximum_typical_um_per_px,
+            )
+            if warning is not None and QMessageBox.question(
+                self,
+                "Check unusual scale",
+                f"{warning}\n\nUse this scale for the entire batch?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            ) != QMessageBox.Yes:
+                return
+        run_network = self._network_checkbox.isChecked()
+        scale_summary = f"1 px = {um:.6g} µm" if um is not None else "pixels only"
+        network_summary = "enabled" if run_network else "disabled"
+        if QMessageBox.question(
+            self,
+            "Confirm batch processing",
+            f"Images: {len(files)}\n"
+            f"Scale: {scale_summary}\n"
+            f"Transects: {self.settings.transect_num_lines} per direction\n"
+            f"Network analysis: {network_summary}\n"
+            f"Output folder: {out_d}\n\n"
+            "A new timestamped results folder will be created. Start processing?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        ) != QMessageBox.Yes:
+            return
         self.run_btn.setEnabled(False)
         self.run_btn.setText("Processing…")
         self._batch_failed = False
-        self._batch_error_count = 0
+        self._batch_success_count = 0
+        self._batch_partial_count = 0
+        self._batch_failed_count = 0
         self._batch_cancel_requested = False
         self._batch_cancelled = False
+        self.progress_bar.setMaximum(len(files))
+        self.progress_bar.setValue(0)
         self.cancel_btn.setEnabled(True)
-        um = self._um_per_px()
-        w = self._run_batch_worker(in_d, out_d, um)
+        try:
+            self._batch_run_dir = create_batch_run_directory(out_d)
+        except OSError as exc:
+            self.run_btn.setEnabled(True)
+            self.run_btn.setText("▶  Start batch processing")
+            self.cancel_btn.setEnabled(False)
+            QMessageBox.critical(
+                self,
+                "Invalid output",
+                f"The batch output folder could not be created.\n\n{exc}",
+            )
+            return
+        w = self._run_batch_worker(
+            in_d, str(self._batch_run_dir), um, run_network
+        )
         self._batch_worker = w
         w.yielded.connect(self._on_progress)
         w.errored.connect(self._on_batch_error)
@@ -2014,15 +2101,19 @@ class BatchProcessingWidget(QWidget):
         self._batch_cancel_requested = True
         self._batch_cancelled = True
         self.cancel_btn.setEnabled(False)
-        self.status_lbl.setText("Cancelling after the current image…")
+        self.status_lbl.setText("Finishing current image before cancelling…")
 
     def _on_progress(self, data) -> None:
-        curr, total, name, failed = data
-        if failed:
-            self._batch_error_count += 1
+        curr, total, name, status = data
+        if status == "success":
+            self._batch_success_count += 1
+        elif status == "partial":
+            self._batch_partial_count += 1
+        else:
+            self._batch_failed_count += 1
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(curr)
-        self.status_lbl.setText(f"Processing: {name}")
+        self.status_lbl.setText(f"Processed {curr}/{total}: {name}")
 
     def _on_batch_error(self, exc) -> None:
         self._batch_failed = True
@@ -2040,30 +2131,58 @@ class BatchProcessingWidget(QWidget):
         self._batch_worker = None
         if self._batch_failed:
             return
-        if self._batch_cancelled:
+        processed = (
+            self._batch_success_count
+            + self._batch_partial_count
+            + self._batch_failed_count
+        )
+        cancelled_early = (
+            self._batch_cancelled and processed < self.progress_bar.maximum()
+        )
+        if cancelled_early:
             self.status_lbl.setText(
-                f"Cancelled · {self.progress_bar.value()} image(s) processed"
+                f"Cancelled · {processed} image(s) processed"
             )
+            if processed == 0:
+                message = "Processing was cancelled before any images were completed."
+            else:
+                message = (
+                    "Processing was cancelled. Results completed before cancellation "
+                    f"were saved in:\n{self._batch_run_dir}\n\n"
+                    f"Successful: {self._batch_success_count}\n"
+                    f"Partial: {self._batch_partial_count}\n"
+                    f"Failed: {self._batch_failed_count}"
+                )
             QMessageBox.information(
                 self, "Batch cancelled",
-                "Processing was cancelled. Results completed before cancellation "
-                "were saved to 'batch_results.csv'."
+                message,
             )
             return
         self.progress_bar.setValue(self.progress_bar.maximum())
-        errors = self._batch_error_count
-        if errors:
-            self.status_lbl.setText(f"Complete with {errors} error(s)")
+        if self._batch_partial_count or self._batch_failed_count:
+            self.status_lbl.setText(
+                "Complete · "
+                f"{self._batch_success_count} successful, "
+                f"{self._batch_partial_count} partial, "
+                f"{self._batch_failed_count} failed"
+            )
             QMessageBox.warning(
                 self, "Completed with errors",
-                f"Processing completed, but {errors} image(s) failed.\n"
-                "See 'batch_results.csv' for the incomplete rows.",
+                "Batch processing complete.\n\n"
+                f"Successful: {self._batch_success_count}\n"
+                f"Partial: {self._batch_partial_count}\n"
+                f"Failed: {self._batch_failed_count}\n\n"
+                f"See the results in:\n{self._batch_run_dir}",
             )
             return
         self.status_lbl.setText("Complete!")
         QMessageBox.information(
             self, "Done",
-            "Batch processing complete.\nSee 'batch_results.csv' in the output folder.",
+            "Batch processing complete.\n\n"
+            f"Successful: {self._batch_success_count}\n"
+            f"Partial: {self._batch_partial_count}\n"
+            f"Failed: {self._batch_failed_count}\n\n"
+            f"Results saved in:\n{self._batch_run_dir}",
         )
  
     @thread_worker
@@ -2072,21 +2191,26 @@ class BatchProcessingWidget(QWidget):
         in_dir_str: str,
         out_dir_str: str,
         um_per_px: Optional[float],
+        run_network: bool,
     ):
         results = []
         for curr, total, name, row in run_batch_processing(
             in_dir_str,
             out_dir_str,
             num_lines=self.settings.transect_num_lines,
+            run_network=run_network,
             um_per_px=um_per_px,
             should_cancel=lambda: self._batch_cancel_requested,
         ):
-            failed = row.get("analysis_status") != "success"
-            yield (curr, total, name, failed)
+            status = row.get("analysis_status", "failed")
             results.append(row)
+            # Persist before reporting progress, so every reported row is durable.
+            write_batch_csv(out_dir_str, results)
+            yield (curr, total, name, status)
         if not results:
+            if self._batch_cancel_requested:
+                return
             raise ValueError("No supported images were found in the input folder.")
-        write_batch_csv(out_dir_str, results)
 
 
 # ---------------------------------------------------------------------------

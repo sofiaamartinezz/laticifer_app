@@ -66,6 +66,10 @@ def generate_structure_based_tissue_mask(
 #  Pixel-ratio density
 # ---------------------------------------------------------------------------
 
+def uses_tissue_reference(area_selection: str) -> bool:
+    """Map the visible density selector label to the intended denominator."""
+    return str(area_selection).strip().lower().startswith("tissue area")
+
 def analyze_density_pixel_ratio(
     mask: np.ndarray,
     roi: Optional[Tuple[slice, slice]] = None,
