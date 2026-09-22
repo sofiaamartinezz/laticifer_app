@@ -207,6 +207,7 @@ python -m pytest --cov=src --cov-report=term-missing
 laticifer_app/
 ├── resources/
 │   └── app_icon.ico
+├── sessions/                    # Local session workspace (contents ignored by Git)
 ├── src/
 │   ├── main.py
 │   ├── data/

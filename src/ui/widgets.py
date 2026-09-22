@@ -1835,8 +1835,60 @@ class InteractiveEditorWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-#  Batch Processing (unchanged logic, minor style)
+#  Batch Processing
 # ---------------------------------------------------------------------------
+
+def _batch_display_path(path: str) -> str:
+    """Show a useful path suffix without exposing its parent directories."""
+    parts = Path(path).parts
+    anchor = next(
+        (index for index, part in enumerate(parts)
+         if part.casefold() == "laticifer_app"),
+        None,
+    )
+    visible = parts[anchor:] if anchor is not None else parts[-2:]
+    return "…/" + "/".join(visible)
+
+
+class _BatchPathEdit(QLineEdit):
+    """Display an abbreviated path while retaining the real path for I/O."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._full_path = ""
+        self.textEdited.connect(self._on_text_edited)
+        self.editingFinished.connect(self._show_short_path)
+
+    def set_path(self, path: str) -> None:
+        self._full_path = path.strip()
+        self._show_short_path()
+
+    def setText(self, text: str) -> None:
+        """Keep programmatic text entry consistent with Browse selection."""
+        self.set_path(text)
+
+    def path(self) -> str:
+        return self._full_path
+
+    def clear(self) -> None:
+        """Clear both the displayed text and the retained filesystem path."""
+        self._full_path = ""
+        super().clear()
+
+    def _on_text_edited(self, text: str) -> None:
+        self._full_path = text.strip()
+
+    def _show_short_path(self) -> None:
+        if self._full_path:
+            super().setText(_batch_display_path(self._full_path))
+            self.setCursorPosition(0)
+        else:
+            self.clear()
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self.selectAll()
+
 
 class BatchProcessingWidget(QWidget):
     def __init__(self, settings: Optional[AppSettings] = None) -> None:
@@ -1853,7 +1905,7 @@ class BatchProcessingWidget(QWidget):
  
         # Input/output folders
         lay.addWidget(QLabel("Input images folder:"))
-        self.input_dir_edit = QLineEdit()
+        self.input_dir_edit = _BatchPathEdit()
         self.input_dir_edit.setPlaceholderText("Select input folder…")
         btn_in = QPushButton("Browse…")
         btn_in.clicked.connect(self._select_input)
@@ -1863,7 +1915,7 @@ class BatchProcessingWidget(QWidget):
         lay.addLayout(row_in)
  
         lay.addWidget(QLabel("Output folder:"))
-        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit = _BatchPathEdit()
         self.output_dir_edit.setPlaceholderText("Select output folder…")
         btn_out = QPushButton("Browse…")
         btn_out.clicked.connect(self._select_output)
@@ -1997,16 +2049,16 @@ class BatchProcessingWidget(QWidget):
     def _select_input(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select Input")
         if d:
-            self.input_dir_edit.setText(d)
+            self.input_dir_edit.set_path(d)
  
     def _select_output(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select Output")
         if d:
-            self.output_dir_edit.setText(d)
+            self.output_dir_edit.set_path(d)
  
     def _start_batch(self) -> None:
-        in_d = self.input_dir_edit.text().strip()
-        out_d = self.output_dir_edit.text().strip()
+        in_d = self.input_dir_edit.path()
+        out_d = self.output_dir_edit.path()
         if not in_d or not out_d:
             QMessageBox.warning(self, "Error", "Select both folders.")
             return
@@ -2059,7 +2111,7 @@ class BatchProcessingWidget(QWidget):
             f"Scale: {scale_summary}\n"
             f"Transects: {self.settings.transect_num_lines} per direction\n"
             f"Network analysis: {network_summary}\n"
-            f"Output folder: {out_d}\n\n"
+            f"Output folder: {_batch_display_path(out_d)}\n\n"
             "A new timestamped results folder will be created. Start processing?",
             QMessageBox.Yes | QMessageBox.Cancel,
             QMessageBox.Yes,
@@ -2148,7 +2200,7 @@ class BatchProcessingWidget(QWidget):
             else:
                 message = (
                     "Processing was cancelled. Results completed before cancellation "
-                    f"were saved in:\n{self._batch_run_dir}\n\n"
+                    f"were saved in:\n{_batch_display_path(str(self._batch_run_dir))}\n\n"
                     f"Successful: {self._batch_success_count}\n"
                     f"Partial: {self._batch_partial_count}\n"
                     f"Failed: {self._batch_failed_count}"
@@ -2172,7 +2224,7 @@ class BatchProcessingWidget(QWidget):
                 f"Successful: {self._batch_success_count}\n"
                 f"Partial: {self._batch_partial_count}\n"
                 f"Failed: {self._batch_failed_count}\n\n"
-                f"See the results in:\n{self._batch_run_dir}",
+                f"See the results in:\n{_batch_display_path(str(self._batch_run_dir))}",
             )
             return
         self.status_lbl.setText("Complete!")
@@ -2182,7 +2234,7 @@ class BatchProcessingWidget(QWidget):
             f"Successful: {self._batch_success_count}\n"
             f"Partial: {self._batch_partial_count}\n"
             f"Failed: {self._batch_failed_count}\n\n"
-            f"Results saved in:\n{self._batch_run_dir}",
+            f"Results saved in:\n{_batch_display_path(str(self._batch_run_dir))}",
         )
  
     @thread_worker
